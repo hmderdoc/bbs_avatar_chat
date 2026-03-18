@@ -1,5 +1,5 @@
 // Avatar Chat - Auto-generated, do not edit directly.
-// Built: 2026-03-18T18:04:52.559Z
+// Built: 2026-03-18T20:14:43.041Z
 load("sbbsdefs.js");
 load("key_defs.js");
 load("frame.js");
@@ -239,8 +239,9 @@ load("json-chat.js");
   var ACTION_BAR_ACTIONS = [
     { id: "who", label: "/who" },
     { id: "channels", label: "/channels" },
+    { id: "private", label: "/private" },
     { id: "help", label: "/help" },
-    { id: "next", label: "Tab next" },
+    { id: "autocomplete", label: "Tab user" },
     { id: "exit", label: "Esc exit" }
   ];
 
@@ -259,6 +260,26 @@ load("json-chat.js");
       };
       InputBuffer2.prototype.getValue = function() {
         return this.value;
+      };
+      InputBuffer2.prototype.setValue = function(value, cursor) {
+        this.value = String(value || "");
+        if (this.value.length > this.maxLength) {
+          this.value = this.value.substr(0, this.maxLength);
+        }
+        if (typeof cursor !== "number" || isNaN(cursor)) {
+          this.cursor = this.value.length;
+          return;
+        }
+        if (cursor < 0) {
+          cursor = 0;
+        }
+        if (cursor > this.value.length) {
+          cursor = this.value.length;
+        }
+        this.cursor = cursor;
+      };
+      InputBuffer2.prototype.getCursor = function() {
+        return this.cursor;
       };
       InputBuffer2.prototype.isEmpty = function() {
         return this.value.length === 0;
@@ -632,6 +653,9 @@ load("json-chat.js");
       if (!action) {
         continue;
       }
+      if (action.attr !== void 0) {
+        attr = action.attr;
+      }
       token = " " + action.label + " ";
       if (x + token.length - 1 > frame.width) {
         break;
@@ -729,6 +753,34 @@ load("json-chat.js");
     frame.gotoxy(3, frame.height - 1);
     frame.putmsg(clipText("Enter switch | Esc close | use /join and /part for edits", frame.width - 4), LIGHTBLUE);
   }
+  function renderPrivateThreadsModal(frame, modal) {
+    var bodyHeight = Math.max(1, frame.height - 3);
+    var selectedIndex = modal.entries.length ? Math.max(0, Math.min(modal.selectedIndex, modal.entries.length - 1)) : 0;
+    var topIndex = modal.entries.length > bodyHeight ? Math.max(0, Math.min(selectedIndex - Math.floor(bodyHeight / 2), modal.entries.length - bodyHeight)) : 0;
+    var row = 0;
+    drawBorder(frame, modal.title);
+    drawHorizontalRule(frame, frame.height - 1, 2, frame.width - 2);
+    if (!modal.entries.length) {
+      frame.gotoxy(2, Math.max(2, Math.floor(frame.height / 2)));
+      frame.putmsg(centerText("No private threads yet.", frame.width - 2), DARKGRAY);
+      frame.gotoxy(3, frame.height - 1);
+      frame.putmsg(clipText("Esc close | use /msg <user> <message>", frame.width - 4), LIGHTBLUE);
+      return;
+    }
+    for (row = 0; row < bodyHeight; row += 1) {
+      var entry = modal.entries[topIndex + row];
+      var label = "";
+      var metaText = "";
+      if (!entry) {
+        break;
+      }
+      metaText = entry.metaText ? entry.metaText : "pm";
+      label = (entry.isCurrent ? "* " : "  ") + entry.name + " (" + metaText + ")";
+      drawListRow(frame, 2, 2 + row, frame.width - 2, label, topIndex + row === selectedIndex, entry.metaText && entry.metaText.indexOf("new ") === 0 ? YELLOW : LIGHTMAGENTA);
+    }
+    frame.gotoxy(3, frame.height - 1);
+    frame.putmsg(clipText("Enter switch | Esc close | unread threads are marked", frame.width - 4), LIGHTBLUE);
+  }
   function renderHelpModal(frame, modal) {
     var width = Math.max(1, frame.width - 4);
     var row = 0;
@@ -765,6 +817,10 @@ load("json-chat.js");
     }
     if (modal.kind === "channels") {
       renderChannelsModal(modalFrame, modal);
+      return;
+    }
+    if (modal.kind === "private") {
+      renderPrivateThreadsModal(modalFrame, modal);
       return;
     }
     renderHelpModal(modalFrame, modal);
@@ -1375,7 +1431,7 @@ load("json-chat.js");
             this.submitInput();
             return;
           case "	":
-            this.performAction("next");
+            this.handleTabCompletion();
             return;
           case KEY_LEFT:
             this.inputBuffer.moveLeft();
@@ -1535,7 +1591,7 @@ load("json-chat.js");
           case KEY_ESC:
           case "\x1B":
           case "\r":
-            if (this.modalState.kind === "channels" && this.modalState.entries.length) {
+            if ((this.modalState.kind === "channels" || this.modalState.kind === "private") && this.modalState.entries.length) {
               var selected = this.modalState.entries[this.modalState.selectedIndex];
               if (selected) {
                 this.currentChannel = selected.name;
@@ -1675,6 +1731,11 @@ load("json-chat.js");
             return;
           case "CHANNELS":
             this.performAction("channels");
+            return;
+          case "PRIVATE":
+          case "PRIVATES":
+          case "PMS":
+            this.performAction("private");
             return;
           case "EXIT":
           case "QUIT":
@@ -1900,6 +1961,98 @@ load("json-chat.js");
         });
         return names;
       };
+      AvatarChatApp2.prototype.handleTabCompletion = function() {
+        var completion = this.buildTabCompletion();
+        if (!completion) {
+          return;
+        }
+        this.inputBuffer.setValue(completion.value, completion.cursor);
+        this.inputSignature = "";
+      };
+      AvatarChatApp2.prototype.buildTabCompletion = function() {
+        var value = this.inputBuffer.getValue();
+        var cursor = this.inputBuffer.getCursor();
+        var privateCompletion = this.buildPrivateCommandTabCompletion(value, cursor);
+        if (privateCompletion) {
+          return privateCompletion;
+        }
+        return this.buildGenericUserTabCompletion(value, cursor);
+      };
+      AvatarChatApp2.prototype.buildPrivateCommandTabCompletion = function(value, cursor) {
+        var beforeCursor = value.substr(0, cursor);
+        var afterCursor = value.substr(cursor);
+        var match = beforeCursor.match(/^(\/(?:msg|pm|tell|whisper)\s+)([\s\S]*)$/i);
+        var fragment = "";
+        var candidate = "";
+        var completed = "";
+        if (!match || trimText(afterCursor).length) {
+          return null;
+        }
+        fragment = match[2] || "";
+        if (!fragment.length) {
+          return null;
+        }
+        if (fragment.charAt(0) === '"') {
+          if (fragment.indexOf('"', 1) >= 0) {
+            return null;
+          }
+          fragment = trimText(fragment.substr(1));
+        } else {
+          fragment = trimText(fragment);
+        }
+        if (!fragment.length) {
+          return null;
+        }
+        candidate = this.findAutocompleteCandidate(fragment, this.listPrivateTargetNames());
+        if (!candidate.length) {
+          return null;
+        }
+        completed = match[1] + (candidate.indexOf(" ") >= 0 ? '"' + candidate + '" ' : candidate + " ");
+        return {
+          value: completed,
+          cursor: completed.length
+        };
+      };
+      AvatarChatApp2.prototype.buildGenericUserTabCompletion = function(value, cursor) {
+        var beforeCursor = value.substr(0, cursor);
+        var afterCursor = value.substr(cursor);
+        var match = beforeCursor.match(/(^|[\s])([^\s"]+)$/);
+        var prefix = "";
+        var fragment = "";
+        var candidate = "";
+        var completed = "";
+        if (trimText(afterCursor).length || beforeCursor.length && beforeCursor.charAt(0) === "/" || !match) {
+          return null;
+        }
+        fragment = match[2] || "";
+        prefix = beforeCursor.substr(0, beforeCursor.length - fragment.length);
+        if (!fragment.length) {
+          return null;
+        }
+        candidate = this.findAutocompleteCandidate(fragment, this.listPrivateTargetNames());
+        if (!candidate.length) {
+          return null;
+        }
+        completed = prefix + candidate + " ";
+        return {
+          value: completed,
+          cursor: completed.length
+        };
+      };
+      AvatarChatApp2.prototype.findAutocompleteCandidate = function(fragment, names) {
+        var normalizedFragment = this.normalizePrivateLookupKey(fragment);
+        var index = 0;
+        if (!normalizedFragment.length) {
+          return "";
+        }
+        for (index = 0; index < names.length; index += 1) {
+          var candidate = names[index] || "";
+          if (candidate.length && this.normalizePrivateLookupKey(candidate).indexOf(normalizedFragment) === 0) {
+            return candidate;
+          }
+        }
+        return "";
+      };
       AvatarChatApp2.prototype.performAction = function(actionId) {
         switch (actionId) {
           case "who":
@@ -1908,11 +2061,11 @@ load("json-chat.js");
           case "channels":
             this.openChannelsModal();
             return;
+          case "private":
+            this.openPrivateThreadsModal();
+            return;
           case "help":
             this.openHelpModal();
-            return;
-          case "next":
-            this.cycleChannel();
             return;
           case "exit":
             this.shouldExit = true;
@@ -1959,6 +2112,28 @@ load("json-chat.js");
         };
         this.resetRenderSignatures();
       };
+      AvatarChatApp2.prototype.openPrivateThreadsModal = function() {
+        var entries = this.buildPrivateThreadEntries();
+        var selectedIndex = 0;
+        var index = 0;
+        for (index = 0; index < entries.length; index += 1) {
+          var entry = entries[index];
+          if (entry && entry.isCurrent) {
+            selectedIndex = index;
+            break;
+          }
+          if (entry && entry.metaText && entry.metaText.indexOf("new ") === 0) {
+            selectedIndex = index;
+          }
+        }
+        this.modalState = {
+          kind: "private",
+          title: "Private Threads",
+          selectedIndex: selectedIndex,
+          entries: entries
+        };
+        this.resetRenderSignatures();
+      };
       AvatarChatApp2.prototype.openHelpModal = function() {
         this.modalState = {
           kind: "help",
@@ -1966,10 +2141,10 @@ load("json-chat.js");
           selectedIndex: 0,
           lines: [
             "Slash commands:",
-            "/who, /channels, /help, /join <channel>, /part [channel], /me <action>, /msg <user> <message>, /r <message>, /clear",
+            "/who, /channels, /private, /help, /join <channel>, /part [channel], /me <action>, /msg <user> <message>, /r <message>, /clear",
             "",
             "Keys:",
-            "Tab cycles joined channels.",
+            "Tab autocompletes user names.",
             "Esc exits the chat or closes a modal.",
             "Arrow keys, Home/End, and Backspace edit the input line.",
             "",
@@ -2097,21 +2272,71 @@ load("json-chat.js");
       };
       AvatarChatApp2.prototype.buildChannelEntries = function() {
         var entries = [];
+        var key = "";
+        if (!this.chat) {
+          return entries;
+        }
+        for (key in this.chat.channels) {
+          if (Object.prototype.hasOwnProperty.call(this.chat.channels, key)) {
+            var channel = this.chat.channels[key];
+            if (!channel || !channel.name || channel.name.charAt(0) === "@") {
+              continue;
+            }
+            entries.push({
+              name: channel.name,
+              userCount: channel.users ? channel.users.length : 0,
+              isCurrent: channel.name.toUpperCase() === this.currentChannel.toUpperCase(),
+              metaText: channel.users ? String(channel.users.length) : "0"
+            });
+          }
+        }
+        entries.sort(function(left, right) {
+          if (left.name.toUpperCase() < right.name.toUpperCase()) {
+            return -1;
+          }
+          if (left.name.toUpperCase() > right.name.toUpperCase()) {
+            return 1;
+          }
+          return 0;
+        });
+        return entries;
+      };
+      AvatarChatApp2.prototype.buildPrivateThreadEntries = function() {
+        var entries = [];
         var index = 0;
-        for (index = 0; index < this.channelOrder.length; index += 1) {
-          var channelName = this.channelOrder[index];
-          var channel = channelName ? this.getChannelByName(channelName) : null;
-          var privateThread = channelName ? this.getPrivateThreadByName(channelName) : null;
-          if (!channelName) {
+        for (index = 0; index < this.privateThreadOrder.length; index += 1) {
+          var threadId = this.privateThreadOrder[index];
+          var thread = threadId ? this.privateThreads[threadId] : null;
+          if (!thread) {
             continue;
           }
           entries.push({
-            name: channelName,
-            userCount: channel && channel.users ? channel.users.length : 0,
-            isCurrent: channelName.toUpperCase() === this.currentChannel.toUpperCase(),
-            metaText: privateThread ? privateThread.unreadCount > 0 ? "new " + String(privateThread.unreadCount) : "pm" : channel && channel.users ? String(channel.users.length) : "0"
+            name: thread.name,
+            userCount: thread.messages.length,
+            isCurrent: thread.name.toUpperCase() === this.currentChannel.toUpperCase(),
+            metaText: thread.unreadCount > 0 ? "new " + String(thread.unreadCount) : "pm"
           });
         }
+        entries.sort(function(left, right) {
+          var leftUnread = left.metaText && left.metaText.indexOf("new ") === 0 ? parseInt(left.metaText.substr(4), 10) || 0 : 0;
+          var rightUnread = right.metaText && right.metaText.indexOf("new ") === 0 ? parseInt(right.metaText.substr(4), 10) || 0 : 0;
+          if (leftUnread !== rightUnread) {
+            return rightUnread - leftUnread;
+          }
+          if (left.isCurrent !== right.isCurrent) {
+            return left.isCurrent ? -1 : 1;
+          }
+          if (left.userCount !== right.userCount) {
+            return right.userCount - left.userCount;
+          }
+          if (left.name.toUpperCase() < right.name.toUpperCase()) {
+            return -1;
+          }
+          if (left.name.toUpperCase() > right.name.toUpperCase()) {
+            return 1;
+          }
+          return 0;
+        });
         return entries;
       };
       AvatarChatApp2.prototype.appendNotice = function(channelName, text) {
@@ -2325,6 +2550,10 @@ load("json-chat.js");
             width = clamp(this.frames.width - 10, 30, 56);
             height = clamp(this.frames.height - 8, 10, 16);
             break;
+          case "private":
+            width = clamp(this.frames.width - 10, 30, 56);
+            height = clamp(this.frames.height - 8, 10, 16);
+            break;
           case "help":
             width = clamp(this.frames.width - 8, 34, 64);
             height = clamp(this.frames.height - 8, 12, 18);
@@ -2416,14 +2645,29 @@ load("json-chat.js");
       };
       AvatarChatApp2.prototype.renderActions = function() {
         var actionsFrame = this.frames.actions;
-        var signature = String(this.frames.width) + "|" + ACTION_BAR_ACTIONS.length;
+        var unreadPmCount = this.getUnreadPrivateThreadCount();
+        var flashPhase = unreadPmCount > 0 ? Math.floor((/* @__PURE__ */ new Date()).getTime() / 500) % 2 : 0;
+        var actions = ACTION_BAR_ACTIONS.map(function(action) {
+          var nextAction = {
+            id: action.id,
+            label: action.label
+          };
+          if (action.id === "private" && unreadPmCount > 0) {
+            nextAction.label = "/private [" + String(unreadPmCount) + "]";
+            nextAction.attr = flashPhase ? BG_RED | YELLOW : BG_CYAN | BLACK;
+          }
+          return nextAction;
+        });
+        var signature = String(this.frames.width) + "|" + actions.map(function(action) {
+          return action.id + ":" + action.label + ":" + String(action.attr || 0);
+        }).join("|");
         if (!actionsFrame) {
           return;
         }
         if (signature === this.actionSignature) {
           return;
         }
-        renderActionBar(actionsFrame, ACTION_BAR_ACTIONS);
+        renderActionBar(actionsFrame, actions);
         this.actionSignature = signature;
       };
       AvatarChatApp2.prototype.renderTranscript = function() {
@@ -2550,6 +2794,8 @@ load("json-chat.js");
               return "Who's Here | Up/Down move | Esc close";
             case "channels":
               return "Channels | Enter switch | Esc close";
+            case "private":
+              return "Private Threads | Enter switch | Esc close";
             case "help":
               return "Help | Esc close";
             default:
@@ -2563,12 +2809,12 @@ load("json-chat.js");
           return "History " + String(this.transcriptScrollOffsetBlocks) + " back | Up/PgUp older | Down/PgDn newer | End latest";
         }
         if (this.getPrivateThreadByName(this.currentChannel)) {
-          return "Private chat | /msg <user> <message> | /r <message> | /channels | Tab next | Esc exit";
+          return "Private chat | /msg <user> <message> | /r <message> | /private | /channels | Tab user | Esc exit";
         }
         if (unreadPmCount > 0) {
-          return "Private unread " + String(unreadPmCount) + " | /msg <user> <message> | /r <message> | Tab next | Esc exit";
+          return "Private unread " + String(unreadPmCount) + " | /private | /msg <user> <message> | /r <message> | Tab user | Esc exit";
         }
-        return "Up/PgUp history | /who /channels /help | /join /part /me /msg /r /clear | Tab next | Esc exit";
+        return "Up/PgUp history | /who /channels /private /help | /join /part /me /msg /r /clear | Tab user | Esc exit";
       };
       AvatarChatApp2.prototype.getUnreadPrivateThreadCount = function() {
         var total = 0;
@@ -2641,7 +2887,7 @@ load("json-chat.js");
             continue;
           }
           var channelEntry = entry;
-          parts.push(channelEntry.name + ":" + String(channelEntry.userCount) + ":" + String(channelEntry.isCurrent));
+          parts.push(channelEntry.name + ":" + String(channelEntry.userCount) + ":" + String(channelEntry.isCurrent) + ":" + String(channelEntry.metaText || ""));
         }
         return parts.join("|");
       };

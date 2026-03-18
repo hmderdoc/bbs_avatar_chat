@@ -23,6 +23,32 @@ export class InputBuffer {
     return this.value;
   }
 
+  public setValue(value: string, cursor?: number): void {
+    this.value = String(value || "");
+
+    if (this.value.length > this.maxLength) {
+      this.value = this.value.substr(0, this.maxLength);
+    }
+
+    if (typeof cursor !== "number" || isNaN(cursor)) {
+      this.cursor = this.value.length;
+      return;
+    }
+
+    if (cursor < 0) {
+      cursor = 0;
+    }
+    if (cursor > this.value.length) {
+      cursor = this.value.length;
+    }
+
+    this.cursor = cursor;
+  }
+
+  public getCursor(): number {
+    return this.cursor;
+  }
+
   public isEmpty(): boolean {
     return this.value.length === 0;
   }

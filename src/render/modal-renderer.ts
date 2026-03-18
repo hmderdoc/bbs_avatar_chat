@@ -1,4 +1,4 @@
-import { AppModalState, ActionBarAction, ChannelsModalState, HelpModalState, RosterEntry, RosterModalState } from "../domain/ui";
+import { AppModalState, ActionBarAction, ChannelsModalState, HelpModalState, PrivateThreadsModalState, RosterEntry, RosterModalState } from "../domain/ui";
 import { AvatarCache, blitAvatarToFrame, lookupAvatarBinary, resolveAvatarDimensions } from "./avatar";
 import { centerText, clipText, padRight, repeatChar, wrapText } from "../util/text";
 
@@ -115,10 +115,14 @@ function renderActionTokens(frame: Frame, actions: ActionBarAction[]): void {
   for (index = 0; index < actions.length; index += 1) {
     const action = actions[index];
     let token = "";
-    const attr = index % 2 === 0 ? (BG_CYAN | BLACK) : (BG_BLUE | WHITE);
+    let attr = index % 2 === 0 ? (BG_CYAN | BLACK) : (BG_BLUE | WHITE);
 
     if (!action) {
       continue;
+    }
+
+    if (action.attr !== undefined) {
+      attr = action.attr;
     }
 
     token = " " + action.label + " ";
@@ -263,6 +267,43 @@ function renderChannelsModal(frame: Frame, modal: ChannelsModalState): void {
   frame.putmsg(clipText("Enter switch | Esc close | use /join and /part for edits", frame.width - 4), LIGHTBLUE);
 }
 
+function renderPrivateThreadsModal(frame: Frame, modal: PrivateThreadsModalState): void {
+  const bodyHeight = Math.max(1, frame.height - 3);
+  const selectedIndex = modal.entries.length ? Math.max(0, Math.min(modal.selectedIndex, modal.entries.length - 1)) : 0;
+  const topIndex = modal.entries.length > bodyHeight
+    ? Math.max(0, Math.min(selectedIndex - Math.floor(bodyHeight / 2), modal.entries.length - bodyHeight))
+    : 0;
+  let row = 0;
+
+  drawBorder(frame, modal.title);
+  drawHorizontalRule(frame, frame.height - 1, 2, frame.width - 2);
+
+  if (!modal.entries.length) {
+    frame.gotoxy(2, Math.max(2, Math.floor(frame.height / 2)));
+    frame.putmsg(centerText("No private threads yet.", frame.width - 2), DARKGRAY);
+    frame.gotoxy(3, frame.height - 1);
+    frame.putmsg(clipText("Esc close | use /msg <user> <message>", frame.width - 4), LIGHTBLUE);
+    return;
+  }
+
+  for (row = 0; row < bodyHeight; row += 1) {
+    const entry = modal.entries[topIndex + row];
+    let label = "";
+    let metaText = "";
+
+    if (!entry) {
+      break;
+    }
+
+    metaText = entry.metaText ? entry.metaText : "pm";
+    label = (entry.isCurrent ? "* " : "  ") + entry.name + " (" + metaText + ")";
+    drawListRow(frame, 2, 2 + row, frame.width - 2, label, topIndex + row === selectedIndex, entry.metaText && entry.metaText.indexOf("new ") === 0 ? YELLOW : LIGHTMAGENTA);
+  }
+
+  frame.gotoxy(3, frame.height - 1);
+  frame.putmsg(clipText("Enter switch | Esc close | unread threads are marked", frame.width - 4), LIGHTBLUE);
+}
+
 function renderHelpModal(frame: Frame, modal: HelpModalState): void {
   const width = Math.max(1, frame.width - 4);
   let row = 0;
@@ -308,6 +349,11 @@ export function renderModal(overlay: Frame, modalFrame: Frame, modal: AppModalSt
 
   if (modal.kind === "channels") {
     renderChannelsModal(modalFrame, modal);
+    return;
+  }
+
+  if (modal.kind === "private") {
+    renderPrivateThreadsModal(modalFrame, modal);
     return;
   }
 

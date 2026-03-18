@@ -1,13 +1,15 @@
 export interface ActionBarAction {
   id: string;
   label: string;
+  attr?: number;
 }
 
 export const ACTION_BAR_ACTIONS: ActionBarAction[] = [
   { id: "who", label: "/who" },
   { id: "channels", label: "/channels" },
+  { id: "private", label: "/private" },
   { id: "help", label: "/help" },
-  { id: "next", label: "Tab next" },
+  { id: "autocomplete", label: "Tab user" },
   { id: "exit", label: "Esc exit" }
 ];
 
@@ -40,9 +42,14 @@ export interface ChannelsModalState extends BaseModalState {
   entries: ChannelListEntry[];
 }
 
+export interface PrivateThreadsModalState extends BaseModalState {
+  kind: "private";
+  entries: ChannelListEntry[];
+}
+
 export interface HelpModalState extends BaseModalState {
   kind: "help";
   lines: string[];
 }
 
-export type AppModalState = RosterModalState | ChannelsModalState | HelpModalState;
+export type AppModalState = RosterModalState | ChannelsModalState | PrivateThreadsModalState | HelpModalState;

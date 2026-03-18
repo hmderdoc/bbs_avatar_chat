@@ -1,6 +1,6 @@
 import { buildNoticeMessage, normalizeChannelName, trimChannelMessages } from "../domain/chat-model";
 import { buildPrivateMessage, buildPrivateThreadId, buildPrivateThreadName, isPrivateMessage, normalizePrivateNick, resolvePrivatePeerNick } from "../domain/private-messages";
-import { ACTION_BAR_ACTIONS, AppModalState, ChannelListEntry, RosterEntry } from "../domain/ui";
+import { ACTION_BAR_ACTIONS, ActionBarAction, AppModalState, ChannelListEntry, RosterEntry } from "../domain/ui";
 import { InputBuffer } from "../input/input-buffer";
 import { AvatarChatConfig } from "../io/config";
 import { AvatarCache } from "../render/avatar";
@@ -563,7 +563,7 @@ export class AvatarChatApp {
         this.submitInput();
         return;
       case "\t":
-        this.performAction("next");
+        this.handleTabCompletion();
         return;
       case KEY_LEFT:
         this.inputBuffer.moveLeft();
@@ -742,7 +742,7 @@ export class AvatarChatApp {
       case KEY_ESC:
       case "\x1b":
       case "\r":
-        if (this.modalState.kind === "channels" && this.modalState.entries.length) {
+        if ((this.modalState.kind === "channels" || this.modalState.kind === "private") && this.modalState.entries.length) {
           const selected = this.modalState.entries[this.modalState.selectedIndex];
           if (selected) {
             this.currentChannel = selected.name;
@@ -901,6 +901,11 @@ export class AvatarChatApp {
         return;
       case "CHANNELS":
         this.performAction("channels");
+        return;
+      case "PRIVATE":
+      case "PRIVATES":
+      case "PMS":
+        this.performAction("private");
         return;
       case "EXIT":
       case "QUIT":
@@ -1191,6 +1196,122 @@ export class AvatarChatApp {
     return names;
   }
 
+  private handleTabCompletion(): void {
+    const completion = this.buildTabCompletion();
+
+    if (!completion) {
+      return;
+    }
+
+    this.inputBuffer.setValue(completion.value, completion.cursor);
+    this.inputSignature = "";
+  }
+
+  private buildTabCompletion(): { value: string; cursor: number } | null {
+    const value = this.inputBuffer.getValue();
+    const cursor = this.inputBuffer.getCursor();
+    const privateCompletion = this.buildPrivateCommandTabCompletion(value, cursor);
+
+    if (privateCompletion) {
+      return privateCompletion;
+    }
+
+    return this.buildGenericUserTabCompletion(value, cursor);
+  }
+
+  private buildPrivateCommandTabCompletion(value: string, cursor: number): { value: string; cursor: number } | null {
+    const beforeCursor = value.substr(0, cursor);
+    const afterCursor = value.substr(cursor);
+    const match = beforeCursor.match(/^(\/(?:msg|pm|tell|whisper)\s+)([\s\S]*)$/i);
+    let fragment = "";
+    let candidate = "";
+    let completed = "";
+
+    if (!match || trimText(afterCursor).length) {
+      return null;
+    }
+
+    fragment = match[2] || "";
+    if (!fragment.length) {
+      return null;
+    }
+
+    if (fragment.charAt(0) === "\"") {
+      if (fragment.indexOf("\"", 1) >= 0) {
+        return null;
+      }
+      fragment = trimText(fragment.substr(1));
+    } else {
+      fragment = trimText(fragment);
+    }
+
+    if (!fragment.length) {
+      return null;
+    }
+
+    candidate = this.findAutocompleteCandidate(fragment, this.listPrivateTargetNames());
+    if (!candidate.length) {
+      return null;
+    }
+
+    completed = match[1] + (candidate.indexOf(" ") >= 0 ? ("\"" + candidate + "\" ") : (candidate + " "));
+    return {
+      value: completed,
+      cursor: completed.length
+    };
+  }
+
+  private buildGenericUserTabCompletion(value: string, cursor: number): { value: string; cursor: number } | null {
+    const beforeCursor = value.substr(0, cursor);
+    const afterCursor = value.substr(cursor);
+    const match = beforeCursor.match(/(^|[\s])([^\s"]+)$/);
+    let prefix = "";
+    let fragment = "";
+    let candidate = "";
+    let completed = "";
+
+    if (trimText(afterCursor).length || (beforeCursor.length && beforeCursor.charAt(0) === "/") || !match) {
+      return null;
+    }
+
+    fragment = match[2] || "";
+    prefix = beforeCursor.substr(0, beforeCursor.length - fragment.length);
+
+    if (!fragment.length) {
+      return null;
+    }
+
+    candidate = this.findAutocompleteCandidate(fragment, this.listPrivateTargetNames());
+    if (!candidate.length) {
+      return null;
+    }
+
+    completed = prefix + candidate + " ";
+    return {
+      value: completed,
+      cursor: completed.length
+    };
+  }
+
+  private findAutocompleteCandidate(fragment: string, names: string[]): string {
+    const normalizedFragment = this.normalizePrivateLookupKey(fragment);
+    let index = 0;
+
+    if (!normalizedFragment.length) {
+      return "";
+    }
+
+    for (index = 0; index < names.length; index += 1) {
+      const candidate = names[index] || "";
+
+      if (candidate.length && this.normalizePrivateLookupKey(candidate).indexOf(normalizedFragment) === 0) {
+        return candidate;
+      }
+    }
+
+    return "";
+  }
+
   private performAction(actionId: string): void {
     switch (actionId) {
       case "who":
@@ -1199,11 +1320,11 @@ export class AvatarChatApp {
       case "channels":
         this.openChannelsModal();
         return;
+      case "private":
+        this.openPrivateThreadsModal();
+        return;
       case "help":
         this.openHelpModal();
-        return;
-      case "next":
-        this.cycleChannel();
         return;
       case "exit":
         this.shouldExit = true;
@@ -1257,6 +1378,31 @@ export class AvatarChatApp {
     this.resetRenderSignatures();
   }
 
+  private openPrivateThreadsModal(): void {
+    const entries = this.buildPrivateThreadEntries();
+    let selectedIndex = 0;
+    let index = 0;
+
+    for (index = 0; index < entries.length; index += 1) {
+      const entry = entries[index];
+      if (entry && entry.isCurrent) {
+        selectedIndex = index;
+        break;
+      }
+      if (entry && entry.metaText && entry.metaText.indexOf("new ") === 0) {
+        selectedIndex = index;
+      }
+    }
+
+    this.modalState = {
+      kind: "private",
+      title: "Private Threads",
+      selectedIndex: selectedIndex,
+      entries: entries
+    };
+    this.resetRenderSignatures();
+  }
+
   private openHelpModal(): void {
     this.modalState = {
       kind: "help",
@@ -1264,10 +1410,10 @@ export class AvatarChatApp {
       selectedIndex: 0,
       lines: [
         "Slash commands:",
-        "/who, /channels, /help, /join <channel>, /part [channel], /me <action>, /msg <user> <message>, /r <message>, /clear",
+        "/who, /channels, /private, /help, /join <channel>, /part [channel], /me <action>, /msg <user> <message>, /r <message>, /clear",
         "",
         "Keys:",
-        "Tab cycles joined channels.",
+        "Tab autocompletes user names.",
         "Esc exits the chat or closes a modal.",
         "Arrow keys, Home/End, and Backspace edit the input line.",
         "",
@@ -1442,26 +1588,86 @@ export class AvatarChatApp {
 
   private buildChannelEntries(): ChannelListEntry[] {
     const entries: ChannelListEntry[] = [];
+    let key = "";
+
+    if (!this.chat) {
+      return entries;
+    }
+
+    for (key in this.chat.channels) {
+      if (Object.prototype.hasOwnProperty.call(this.chat.channels, key)) {
+        const channel = this.chat.channels[key];
+
+        if (!channel || !channel.name || channel.name.charAt(0) === "@") {
+          continue;
+        }
+
+        entries.push({
+          name: channel.name,
+          userCount: channel.users ? channel.users.length : 0,
+          isCurrent: channel.name.toUpperCase() === this.currentChannel.toUpperCase(),
+          metaText: channel.users ? String(channel.users.length) : "0"
+        });
+      }
+    }
+
+    entries.sort(function (left, right) {
+      if (left.name.toUpperCase() < right.name.toUpperCase()) {
+        return -1;
+      }
+      if (left.name.toUpperCase() > right.name.toUpperCase()) {
+        return 1;
+      }
+      return 0;
+    });
+
+    return entries;
+  }
+
+  private buildPrivateThreadEntries(): ChannelListEntry[] {
+    const entries: ChannelListEntry[] = [];
     let index = 0;
 
-    for (index = 0; index < this.channelOrder.length; index += 1) {
-      const channelName = this.channelOrder[index];
-      const channel = channelName ? this.getChannelByName(channelName) : null;
-      const privateThread = channelName ? this.getPrivateThreadByName(channelName) : null;
+    for (index = 0; index < this.privateThreadOrder.length; index += 1) {
+      const threadId = this.privateThreadOrder[index];
+      const thread = threadId ? this.privateThreads[threadId] : null;
 
-      if (!channelName) {
+      if (!thread) {
         continue;
       }
 
       entries.push({
-        name: channelName,
-        userCount: channel && channel.users ? channel.users.length : 0,
-        isCurrent: channelName.toUpperCase() === this.currentChannel.toUpperCase(),
-        metaText: privateThread
-          ? (privateThread.unreadCount > 0 ? ("new " + String(privateThread.unreadCount)) : "pm")
-          : (channel && channel.users ? String(channel.users.length) : "0")
+        name: thread.name,
+        userCount: thread.messages.length,
+        isCurrent: thread.name.toUpperCase() === this.currentChannel.toUpperCase(),
+        metaText: thread.unreadCount > 0 ? ("new " + String(thread.unreadCount)) : "pm"
       });
     }
+
+    entries.sort(function (left, right) {
+      const leftUnread = left.metaText && left.metaText.indexOf("new ") === 0 ? parseInt(left.metaText.substr(4), 10) || 0 : 0;
+      const rightUnread = right.metaText && right.metaText.indexOf("new ") === 0 ? parseInt(right.metaText.substr(4), 10) || 0 : 0;
+
+      if (leftUnread !== rightUnread) {
+        return rightUnread - leftUnread;
+      }
+
+      if (left.isCurrent !== right.isCurrent) {
+        return left.isCurrent ? -1 : 1;
+      }
+
+      if (left.userCount !== right.userCount) {
+        return right.userCount - left.userCount;
+      }
+
+      if (left.name.toUpperCase() < right.name.toUpperCase()) {
+        return -1;
+      }
+      if (left.name.toUpperCase() > right.name.toUpperCase()) {
+        return 1;
+      }
+      return 0;
+    });
 
     return entries;
   }
@@ -1754,6 +1960,10 @@ export class AvatarChatApp {
         width = clamp(this.frames.width - 10, 30, 56);
         height = clamp(this.frames.height - 8, 10, 16);
         break;
+      case "private":
+        width = clamp(this.frames.width - 10, 30, 56);
+        height = clamp(this.frames.height - 8, 10, 16);
+        break;
       case "help":
         width = clamp(this.frames.width - 8, 34, 64);
         height = clamp(this.frames.height - 8, 12, 18);
@@ -1884,7 +2094,24 @@ export class AvatarChatApp {
 
   private renderActions(): void {
     const actionsFrame = this.frames.actions;
-    const signature = String(this.frames.width) + "|" + ACTION_BAR_ACTIONS.length;
+    const unreadPmCount = this.getUnreadPrivateThreadCount();
+    const flashPhase = unreadPmCount > 0 ? Math.floor(new Date().getTime() / 500) % 2 : 0;
+    const actions = ACTION_BAR_ACTIONS.map(function (action) {
+      const nextAction: ActionBarAction = {
+        id: action.id,
+        label: action.label
+      };
+
+      if (action.id === "private" && unreadPmCount > 0) {
+        nextAction.label = "/private [" + String(unreadPmCount) + "]";
+        nextAction.attr = flashPhase ? (BG_RED | YELLOW) : (BG_CYAN | BLACK);
+      }
+
+      return nextAction;
+    });
+    const signature = String(this.frames.width) + "|" + actions.map(function (action) {
+      return action.id + ":" + action.label + ":" + String(action.attr || 0);
+    }).join("|");
 
     if (!actionsFrame) {
       return;
@@ -1894,7 +2121,7 @@ export class AvatarChatApp {
       return;
     }
 
-    renderActionBar(actionsFrame, ACTION_BAR_ACTIONS);
+    renderActionBar(actionsFrame, actions);
     this.actionSignature = signature;
   }
 
@@ -2058,6 +2285,8 @@ export class AvatarChatApp {
           return "Who's Here | Up/Down move | Esc close";
         case "channels":
           return "Channels | Enter switch | Esc close";
+        case "private":
+          return "Private Threads | Enter switch | Esc close";
         case "help":
           return "Help | Esc close";
         default:
@@ -2074,14 +2303,14 @@ export class AvatarChatApp {
     }
 
     if (this.getPrivateThreadByName(this.currentChannel)) {
-      return "Private chat | /msg <user> <message> | /r <message> | /channels | Tab next | Esc exit";
+      return "Private chat | /msg <user> <message> | /r <message> | /private | /channels | Tab user | Esc exit";
     }
 
     if (unreadPmCount > 0) {
-      return "Private unread " + String(unreadPmCount) + " | /msg <user> <message> | /r <message> | Tab next | Esc exit";
+      return "Private unread " + String(unreadPmCount) + " | /private | /msg <user> <message> | /r <message> | Tab user | Esc exit";
     }
 
-    return "Up/PgUp history | /who /channels /help | /join /part /me /msg /r /clear | Tab next | Esc exit";
+    return "Up/PgUp history | /who /channels /private /help | /join /part /me /msg /r /clear | Tab user | Esc exit";
   }
 
   private getUnreadPrivateThreadCount(): number {
@@ -2174,7 +2403,7 @@ export class AvatarChatApp {
       }
 
       const channelEntry = entry as ChannelListEntry;
-      parts.push(channelEntry.name + ":" + String(channelEntry.userCount) + ":" + String(channelEntry.isCurrent));
+      parts.push(channelEntry.name + ":" + String(channelEntry.userCount) + ":" + String(channelEntry.isCurrent) + ":" + String(channelEntry.metaText || ""));
     }
 
     return parts.join("|");
