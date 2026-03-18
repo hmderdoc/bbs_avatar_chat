@@ -12,12 +12,12 @@ This project is currently pre-alpha. The shipped default configuration points at
 
 - In SCFG, add a new External Program with the following options, leaving all other options at their default values:
 
+```
     Name: AvatarChat
     Internal Code: AVTCHAT
     Start-up Directory: /sbbs/xtrn/avatar_chat
     Command Line: ?avatar_chat.js
-
-
+```
 
 ## Quick Start
 
