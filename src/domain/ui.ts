@@ -22,6 +22,7 @@ export interface ChannelListEntry {
   name: string;
   userCount: number;
   isCurrent: boolean;
+  metaText?: string;
 }
 
 interface BaseModalState {

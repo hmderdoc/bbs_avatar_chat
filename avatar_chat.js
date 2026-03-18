@@ -1,12 +1,12 @@
 // Avatar Chat - Auto-generated, do not edit directly.
-// Built: 2026-03-18T02:12:55.073Z
+// Built: 2026-03-18T03:56:32.297Z
 load("sbbsdefs.js");
 load("key_defs.js");
 load("frame.js");
 load("json-client.js");
 load("json-chat.js");
 (function() {
-  // repo/xtrn/avatar_chat/build/util/text.js
+  // build/util/text.js
   function clamp(value, minimum, maximum) {
     if (value < minimum) {
       return minimum;
@@ -107,7 +107,7 @@ load("json-chat.js");
     return hourText + ":" + minuteText + (isPm ? " pm" : " am");
   }
 
-  // repo/xtrn/avatar_chat/build/domain/chat-model.js
+  // build/domain/chat-model.js
   function normalizeChannelName(name, fallback) {
     var trimmed = trimText(name);
     if (trimmed.length) {
@@ -182,7 +182,58 @@ load("json-chat.js");
     return groups;
   }
 
-  // repo/xtrn/avatar_chat/build/domain/ui.js
+  // build/domain/private-messages.js
+  function normalizePrivateNick(nick) {
+    var name = trimText(String(nick && nick.name ? nick.name : ""));
+    if (!name.length) {
+      return null;
+    }
+    return {
+      name: name,
+      host: nick && nick.host ? trimText(String(nick.host)) : void 0,
+      ip: nick && nick.ip ? String(nick.ip) : void 0,
+      qwkid: nick && nick.qwkid ? trimText(String(nick.qwkid)).toUpperCase() : void 0
+    };
+  }
+  function isPrivateMessage(message) {
+    return !!(message && message.private && message.private.to && message.private.to.name && trimText(String(message.private.to.name)).length);
+  }
+  function buildPrivateMessage(sender, recipient, text, timestamp) {
+    return {
+      nick: normalizePrivateNick(sender) || sender,
+      str: text,
+      time: timestamp,
+      private: {
+        to: normalizePrivateNick(recipient) || recipient
+      }
+    };
+  }
+  function buildPrivateThreadId(nick) {
+    var normalized = normalizePrivateNick(nick);
+    var nameKey = normalized ? trimText(String(normalized.name)).replace(/[^A-Za-z0-9]/g, "").toUpperCase() : "";
+    var remoteKey = normalized && normalized.qwkid ? normalized.qwkid : normalized && normalized.host ? normalized.host.toUpperCase() : "";
+    return [
+      nameKey,
+      remoteKey
+    ].join("|");
+  }
+  function buildPrivateThreadName(nick) {
+    var normalized = normalizePrivateNick(nick);
+    return "@" + (normalized ? normalized.name : "");
+  }
+  function resolvePrivatePeerNick(message, ownAlias) {
+    var sender = normalizePrivateNick(message.nick || null);
+    var recipient = normalizePrivateNick(message.private ? message.private.to : null);
+    if (!sender || !recipient) {
+      return null;
+    }
+    if (sender.name.toUpperCase() === ownAlias.toUpperCase()) {
+      return recipient;
+    }
+    return sender;
+  }
+
+  // build/domain/ui.js
   var ACTION_BAR_ACTIONS = [
     { id: "who", label: "/who" },
     { id: "channels", label: "/channels" },
@@ -191,7 +242,7 @@ load("json-chat.js");
     { id: "exit", label: "Esc exit" }
   ];
 
-  // repo/xtrn/avatar_chat/build/input/input-buffer.js
+  // build/input/input-buffer.js
   var InputBuffer = (
     /** @class */
     function() {
@@ -285,7 +336,7 @@ load("json-chat.js");
     }()
   );
 
-  // repo/xtrn/avatar_chat/build/render/avatar.js
+  // build/render/avatar.js
   function resolveAvatarDimensions(avatarLib) {
     if (avatarLib && avatarLib.defs) {
       return {
@@ -396,7 +447,7 @@ load("json-chat.js");
     }
   }
 
-  // repo/xtrn/avatar_chat/build/render/modal-renderer.js
+  // build/render/modal-renderer.js
   var BOX_TOP_LEFT = "\xDA";
   var BOX_TOP_RIGHT = "\xBF";
   var BOX_BOTTOM_LEFT = "\xC0";
@@ -572,10 +623,12 @@ load("json-chat.js");
     for (row = 0; row < bodyHeight; row += 1) {
       var entry = modal.entries[topIndex + row];
       var label = "";
+      var metaText = "";
       if (!entry) {
         break;
       }
-      label = (entry.isCurrent ? "* " : "  ") + entry.name + " (" + String(entry.userCount) + ")";
+      metaText = entry.metaText ? entry.metaText : String(entry.userCount);
+      label = (entry.isCurrent ? "* " : "  ") + entry.name + " (" + metaText + ")";
       drawListRow(frame, 2, 2 + row, frame.width - 2, label, topIndex + row === selectedIndex, entry.isCurrent ? LIGHTCYAN : WHITE);
     }
     frame.gotoxy(3, frame.height - 1);
@@ -622,7 +675,7 @@ load("json-chat.js");
     renderHelpModal(modalFrame, modal);
   }
 
-  // repo/xtrn/avatar_chat/build/render/transcript-renderer.js
+  // build/render/transcript-renderer.js
   function measureBubbleWidth(rows) {
     var width = 0;
     var index = 0;
@@ -819,7 +872,7 @@ load("json-chat.js");
     return renderState;
   }
 
-  // repo/xtrn/avatar_chat/build/app/avatar-chat-app.js
+  // build/app/avatar-chat-app.js
   var INPUT_ESCAPE_SEQUENCE_MAP = {
     "\x1B[A": KEY_UP,
     "\x1B[B": KEY_DOWN,
@@ -864,6 +917,9 @@ load("json-chat.js");
         this.avatarCache = {};
         this.avatarLib = null;
         this.chat = null;
+        this.privateThreads = {};
+        this.privateThreadOrder = [];
+        this.lastPrivateSender = null;
         this.frames = {
           root: null,
           header: null,
@@ -894,6 +950,8 @@ load("json-chat.js");
         this.pendingEscapeSequence = "";
         this.pendingEscapeAt = 0;
         this.lastWasCarriageReturn = false;
+        this.privateMessageKeys = {};
+        this.lastPrivateHistorySyncAt = 0;
         try {
           this.avatarLib = load({}, "avatar_lib.js");
         } catch (error) {
@@ -919,7 +977,7 @@ load("json-chat.js");
         }
       };
       AvatarChatApp2.prototype.connect = function() {
-        var desiredChannels = this.channelOrder.length ? this.channelOrder.slice(0) : [this.config.defaultChannel];
+        var desiredChannels = this.getJoinedPublicChannelNames();
         var desiredCurrent = this.currentChannel;
         var client;
         var index = 0;
@@ -927,6 +985,12 @@ load("json-chat.js");
           client = new JSONClient(this.config.host, this.config.port);
           this.chat = new JSONChat(user.number, client);
           this.chat.settings.MAX_HISTORY = this.config.maxHistory;
+          this.installPrivateMessageHook();
+          this.privateThreads = {};
+          this.privateThreadOrder = [];
+          this.lastPrivateSender = null;
+          this.privateMessageKeys = {};
+          this.lastPrivateHistorySyncAt = 0;
           for (index = 0; index < desiredChannels.length; index += 1) {
             var desiredChannel = desiredChannels[index];
             var channelName = normalizeChannelName(desiredChannel || this.config.defaultChannel, this.config.defaultChannel);
@@ -934,12 +998,14 @@ load("json-chat.js");
               this.chat.join(channelName);
             }
           }
+          this.loadPrivateHistory();
           this.syncChannelOrder();
-          if (desiredCurrent && this.getChannelByName(desiredCurrent)) {
+          if (desiredCurrent && (this.getChannelByName(desiredCurrent) || this.getPrivateThreadByName(desiredCurrent))) {
             this.currentChannel = desiredCurrent;
           } else if (this.channelOrder.length > 0) {
             this.currentChannel = this.channelOrder[0] || this.config.defaultChannel;
           }
+          this.markPrivateThreadRead(this.currentChannel);
           this.transcriptScrollOffsetBlocks = 0;
           this.transcriptVisibleBlockCount = 0;
           this.transcriptMaxScrollOffsetBlocks = 0;
@@ -957,6 +1023,7 @@ load("json-chat.js");
         }
         try {
           this.chat.cycle();
+          this.syncPrivateHistory();
           this.syncChannelOrder();
           this.trimHistories();
         } catch (error) {
@@ -966,6 +1033,193 @@ load("json-chat.js");
           }
           this.chat = null;
           this.scheduleReconnect("Connection lost: " + String(error));
+        }
+      };
+      AvatarChatApp2.prototype.installPrivateMessageHook = function() {
+        var _this = this;
+        var originalUpdate = null;
+        if (!this.chat || typeof this.chat.update !== "function") {
+          return;
+        }
+        originalUpdate = this.chat.update.bind(this.chat);
+        this.chat.update = function(packet) {
+          if (_this.handlePrivateMailboxPacket(packet)) {
+            return true;
+          }
+          return originalUpdate ? originalUpdate(packet) : false;
+        };
+      };
+      AvatarChatApp2.prototype.loadPrivateHistory = function() {
+        var historyLimit = Math.max(50, this.config.maxHistory * 2);
+        var history = [];
+        var index = 0;
+        if (!this.chat) {
+          return;
+        }
+        this.ensureHistoryArray(this.getMailboxHistoryPath());
+        try {
+          history = this.chat.client.slice("chat", this.getMailboxHistoryPath(), -historyLimit, void 0, 1) || [];
+        } catch (_error) {
+          history = [];
+        }
+        for (index = 0; index < history.length; index += 1) {
+          var message = history[index];
+          if (!isPrivateMessage(message)) {
+            continue;
+          }
+          this.appendPrivateMessage(message, false);
+        }
+        this.lastPrivateHistorySyncAt = (/* @__PURE__ */ new Date()).getTime();
+      };
+      AvatarChatApp2.prototype.handlePrivateMailboxPacket = function(packet) {
+        var message = null;
+        if (!packet || packet.oper !== "WRITE" || packet.location !== this.getMailboxMessagesPath()) {
+          return false;
+        }
+        message = packet.data;
+        if (!isPrivateMessage(message)) {
+          return false;
+        }
+        this.appendPrivateMessage(message, true);
+        return true;
+      };
+      AvatarChatApp2.prototype.appendPrivateMessage = function(message, markUnread) {
+        var peerNick = resolvePrivatePeerNick(message, user.alias);
+        var thread;
+        if (!peerNick) {
+          return;
+        }
+        if (!this.rememberPrivateMessage(message)) {
+          return;
+        }
+        thread = this.ensurePrivateThread(peerNick);
+        thread.messages.push(message);
+        trimChannelMessages(thread, this.config.maxHistory);
+        if (markUnread && message.nick && message.nick.name && message.nick.name.toUpperCase() !== user.alias.toUpperCase() && this.currentChannel.toUpperCase() !== thread.name.toUpperCase()) {
+          thread.unreadCount += 1;
+          this.lastPrivateSender = peerNick;
+        }
+        if (message.nick && message.nick.name && message.nick.name.toUpperCase() !== user.alias.toUpperCase()) {
+          this.lastPrivateSender = peerNick;
+        }
+        this.syncChannelOrder();
+        this.resetRenderSignatures();
+      };
+      AvatarChatApp2.prototype.ensurePrivateThread = function(peerNick) {
+        var normalizedPeer = normalizePrivateNick(peerNick) || peerNick;
+        var canonicalPeer = this.resolvePrivateTargetNick(normalizedPeer.name) || normalizedPeer;
+        var threadId = buildPrivateThreadId(canonicalPeer);
+        var thread = this.privateThreads[threadId];
+        var previousName = "";
+        if (!thread) {
+          thread = {
+            id: threadId,
+            name: buildPrivateThreadName(canonicalPeer),
+            peerNick: canonicalPeer,
+            messages: [],
+            unreadCount: 0
+          };
+          this.privateThreads[threadId] = thread;
+          this.privateThreadOrder.push(threadId);
+        } else {
+          previousName = thread.name;
+          thread.peerNick = canonicalPeer;
+          thread.name = buildPrivateThreadName(canonicalPeer);
+          if (previousName.length && this.currentChannel.toUpperCase() === previousName.toUpperCase()) {
+            this.currentChannel = thread.name;
+          }
+        }
+        return thread;
+      };
+      AvatarChatApp2.prototype.getPrivateThreadByName = function(name) {
+        var index = 0;
+        for (index = 0; index < this.privateThreadOrder.length; index += 1) {
+          var threadId = this.privateThreadOrder[index];
+          var thread = threadId ? this.privateThreads[threadId] : null;
+          if (thread && thread.name.toUpperCase() === name.toUpperCase()) {
+            return thread;
+          }
+        }
+        return null;
+      };
+      AvatarChatApp2.prototype.getJoinedPublicChannelNames = function() {
+        var publicChannels = [];
+        var index = 0;
+        for (index = 0; index < this.channelOrder.length; index += 1) {
+          var channelName = this.channelOrder[index];
+          if (channelName && channelName.charAt(0) !== "@") {
+            publicChannels.push(channelName);
+          }
+        }
+        if (!publicChannels.length) {
+          publicChannels.push(normalizeChannelName(this.config.defaultChannel));
+        }
+        return publicChannels;
+      };
+      AvatarChatApp2.prototype.getMailboxMessagesPath = function() {
+        return "channels." + user.alias + ".messages";
+      };
+      AvatarChatApp2.prototype.getMailboxHistoryPath = function() {
+        return "channels." + user.alias + ".history";
+      };
+      AvatarChatApp2.prototype.ensureHistoryArray = function(location) {
+        var existing;
+        if (!this.chat) {
+          return;
+        }
+        try {
+          existing = this.chat.client.read("chat", location, 1);
+        } catch (_readError) {
+          existing = null;
+        }
+        if (existing instanceof Array) {
+          return;
+        }
+        this.chat.client.write("chat", location, [], 2);
+      };
+      AvatarChatApp2.prototype.buildPrivateMessageKey = function(message) {
+        var sender = normalizePrivateNick(message.nick || null);
+        var recipient = normalizePrivateNick(message.private ? message.private.to : null);
+        var senderKey = sender ? this.normalizePrivateLookupKey(sender.name) + "|" + (sender.qwkid || String(sender.host || "").toUpperCase()) : "";
+        var recipientKey = recipient ? this.normalizePrivateLookupKey(recipient.name) + "|" + (recipient.qwkid || String(recipient.host || "").toUpperCase()) : "";
+        return [
+          String(message.time || 0),
+          senderKey,
+          recipientKey,
+          String(message.str || "")
+        ].join("|");
+      };
+      AvatarChatApp2.prototype.rememberPrivateMessage = function(message) {
+        var key = this.buildPrivateMessageKey(message);
+        if (this.privateMessageKeys[key]) {
+          return false;
+        }
+        this.privateMessageKeys[key] = true;
+        return true;
+      };
+      AvatarChatApp2.prototype.syncPrivateHistory = function() {
+        var now = (/* @__PURE__ */ new Date()).getTime();
+        var historyLimit = Math.max(50, this.config.maxHistory * 2);
+        var history = [];
+        var index = 0;
+        if (!this.chat) {
+          return;
+        }
+        if (this.lastPrivateHistorySyncAt && now - this.lastPrivateHistorySyncAt < 1e3) {
+          return;
+        }
+        this.lastPrivateHistorySyncAt = now;
+        try {
+          history = this.chat.client.slice("chat", this.getMailboxHistoryPath(), -historyLimit, void 0, 1) || [];
+        } catch (_error) {
+          history = [];
+        }
+        for (index = 0; index < history.length; index += 1) {
+          var message = history[index];
+          if (!isPrivateMessage(message)) {
+            continue;
+          }
+          this.appendPrivateMessage(message, true);
         }
       };
       AvatarChatApp2.prototype.reconnectIfDue = function() {
@@ -1175,6 +1429,7 @@ load("json-chat.js");
               var selected = this.modalState.entries[this.modalState.selectedIndex];
               if (selected) {
                 this.currentChannel = selected.name;
+                this.markPrivateThreadRead(this.currentChannel);
                 this.scrollTranscriptToLatest();
               }
             }
@@ -1190,6 +1445,7 @@ load("json-chat.js");
       AvatarChatApp2.prototype.submitInput = function() {
         var text = this.inputBuffer.getValue();
         var trimmed = trimText(text);
+        var privateThread = this.currentChannel.length ? this.getPrivateThreadByName(this.currentChannel) : null;
         if (!trimmed.length) {
           this.inputBuffer.clear();
           return;
@@ -1205,7 +1461,11 @@ load("json-chat.js");
           return;
         }
         this.scrollTranscriptToLatest();
-        if (!this.sendMessage(this.currentChannel, trimmed)) {
+        if (privateThread) {
+          if (!this.sendPrivateMessage(privateThread.peerNick, trimmed)) {
+            this.appendViewNotice(this.currentChannel, "Unable to send private message.");
+          }
+        } else if (!this.sendMessage(this.currentChannel, trimmed)) {
           this.appendNotice(this.currentChannel, "Unable to send message.");
         }
         this.inputBuffer.clear();
@@ -1238,6 +1498,42 @@ load("json-chat.js");
           return false;
         }
       };
+      AvatarChatApp2.prototype.sendPrivateMessage = function(targetNick, text) {
+        var recipient = normalizePrivateNick(targetNick);
+        var sender = normalizePrivateNick({
+          name: user.alias,
+          host: system.name,
+          ip: user.ip_address,
+          qwkid: system.qwk_id
+        });
+        var timestamp = (/* @__PURE__ */ new Date()).getTime();
+        var thread;
+        var message;
+        if (!this.chat || !recipient || !sender) {
+          return false;
+        }
+        message = buildPrivateMessage(sender, recipient, text, timestamp);
+        try {
+          this.ensureHistoryArray("channels." + recipient.name + ".history");
+          this.ensureHistoryArray(this.getMailboxHistoryPath());
+          this.chat.client.write("chat", "channels." + recipient.name + ".messages", message, 2);
+          this.chat.client.push("chat", "channels." + recipient.name + ".history", message, 2);
+          this.chat.client.push("chat", this.getMailboxHistoryPath(), message, 2);
+          this.rememberPrivateMessage(message);
+          thread = this.ensurePrivateThread(recipient);
+          thread.messages.push(message);
+          thread.unreadCount = 0;
+          trimChannelMessages(thread, this.config.maxHistory);
+          this.currentChannel = thread.name;
+          this.syncChannelOrder();
+          this.transcriptSignature = "";
+          this.statusSignature = "";
+          this.headerSignature = "";
+          return true;
+        } catch (_error) {
+          return false;
+        }
+      };
       AvatarChatApp2.prototype.handleSlashCommand = function(commandText) {
         var trimmedCommand = trimText(commandText.substr(1));
         var parts = trimmedCommand.split(/\s+/);
@@ -1246,6 +1542,14 @@ load("json-chat.js");
         var args = trimmedCommand.length > verb.length ? trimText(trimmedCommand.substr(verb.length)) : "";
         var targetChannel = "";
         if (!verb.length) {
+          return;
+        }
+        if (verb === "MSG" || verb === "PM" || verb === "TELL" || verb === "WHISPER") {
+          this.handlePrivateCommand(args);
+          return;
+        }
+        if (verb === "R" || verb === "REPLY") {
+          this.handlePrivateReplyCommand(args);
           return;
         }
         switch (verb) {
@@ -1318,6 +1622,170 @@ load("json-chat.js");
         }
         this.resetRenderSignatures();
       };
+      AvatarChatApp2.prototype.handlePrivateCommand = function(args) {
+        var parsed = this.parsePrivateCommandArgs(args);
+        var recipientName = "";
+        var messageText = "";
+        var targetNick;
+        if (!this.chat) {
+          this.lastError = "Not connected to chat";
+          return;
+        }
+        if (!parsed) {
+          this.appendViewNotice(this.currentChannel, "Usage: /msg <user> <message>");
+          return;
+        }
+        recipientName = parsed.recipientName;
+        messageText = parsed.messageText;
+        targetNick = this.resolvePrivateTargetNick(recipientName);
+        if (!targetNick) {
+          this.appendViewNotice(this.currentChannel, "User not found: " + recipientName + ".");
+          return;
+        }
+        if (!this.sendPrivateMessage(targetNick, messageText)) {
+          this.appendViewNotice(this.currentChannel, "Unable to send private message to " + recipientName + ".");
+          return;
+        }
+        this.scrollTranscriptToLatest();
+      };
+      AvatarChatApp2.prototype.handlePrivateReplyCommand = function(args) {
+        if (!this.chat) {
+          this.lastError = "Not connected to chat";
+          return;
+        }
+        if (!args.length) {
+          this.appendViewNotice(this.currentChannel, "Usage: /r <message>");
+          return;
+        }
+        if (!this.lastPrivateSender || !this.sendPrivateMessage(this.lastPrivateSender, args)) {
+          this.appendViewNotice(this.currentChannel, "Nobody has private messaged you yet.");
+          return;
+        }
+        this.scrollTranscriptToLatest();
+      };
+      AvatarChatApp2.prototype.resolvePrivateTargetNick = function(name) {
+        var trimmedName = trimText(name);
+        var normalizedTarget = this.normalizePrivateLookupKey(trimmedName);
+        var key = "";
+        var index = 0;
+        if (!trimmedName.length) {
+          return null;
+        }
+        if (this.chat) {
+          for (key in this.chat.channels) {
+            if (Object.prototype.hasOwnProperty.call(this.chat.channels, key)) {
+              var channel = this.chat.channels[key];
+              var rosterIndex = 0;
+              if (!channel || !channel.users) {
+                continue;
+              }
+              for (rosterIndex = 0; rosterIndex < channel.users.length; rosterIndex += 1) {
+                var rosterEntry = this.extractRosterEntry(channel.users[rosterIndex]);
+                if (rosterEntry && rosterEntry.nick && (rosterEntry.name.toUpperCase() === trimmedName.toUpperCase() || this.normalizePrivateLookupKey(rosterEntry.name) === normalizedTarget)) {
+                  return rosterEntry.nick;
+                }
+              }
+            }
+          }
+        }
+        for (index = 0; index < this.privateThreadOrder.length; index += 1) {
+          var threadId = this.privateThreadOrder[index];
+          var thread = threadId ? this.privateThreads[threadId] : null;
+          if (thread && (thread.peerNick.name.toUpperCase() === trimmedName.toUpperCase() || this.normalizePrivateLookupKey(thread.peerNick.name) === normalizedTarget)) {
+            return thread.peerNick;
+          }
+        }
+        return null;
+      };
+      AvatarChatApp2.prototype.normalizePrivateLookupKey = function(text) {
+        return trimText(text).replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+      };
+      AvatarChatApp2.prototype.parsePrivateCommandArgs = function(args) {
+        var trimmedArgs = trimText(args);
+        var recipientName = "";
+        var messageText = "";
+        var closingQuoteIndex = 0;
+        var spaceIndex = 0;
+        var candidateNames;
+        var candidateIndex = 0;
+        if (!trimmedArgs.length) {
+          return null;
+        }
+        if (trimmedArgs.charAt(0) === '"') {
+          closingQuoteIndex = trimmedArgs.indexOf('"', 1);
+          if (closingQuoteIndex < 2) {
+            return null;
+          }
+          recipientName = trimText(trimmedArgs.substring(1, closingQuoteIndex));
+          messageText = trimText(trimmedArgs.substr(closingQuoteIndex + 1));
+          return recipientName.length && messageText.length ? { recipientName: recipientName, messageText: messageText } : null;
+        }
+        candidateNames = this.listPrivateTargetNames();
+        for (candidateIndex = 0; candidateIndex < candidateNames.length; candidateIndex += 1) {
+          var candidateName = candidateNames[candidateIndex] || "";
+          if (!candidateName.length) {
+            continue;
+          }
+          if (trimmedArgs.substr(0, candidateName.length).toUpperCase() !== candidateName.toUpperCase()) {
+            continue;
+          }
+          if (trimmedArgs.length > candidateName.length && trimmedArgs.charAt(candidateName.length) !== " ") {
+            continue;
+          }
+          recipientName = candidateName;
+          messageText = trimText(trimmedArgs.substr(candidateName.length));
+          if (recipientName.length && messageText.length) {
+            return {
+              recipientName: recipientName,
+              messageText: messageText
+            };
+          }
+        }
+        spaceIndex = trimmedArgs.indexOf(" ");
+        if (spaceIndex < 1) {
+          return null;
+        }
+        recipientName = trimText(trimmedArgs.substr(0, spaceIndex));
+        messageText = trimText(trimmedArgs.substr(spaceIndex + 1));
+        return recipientName.length && messageText.length ? { recipientName: recipientName, messageText: messageText } : null;
+      };
+      AvatarChatApp2.prototype.listPrivateTargetNames = function() {
+        var seen = {};
+        var names = [];
+        var index = 0;
+        var key = "";
+        for (index = 0; index < this.privateThreadOrder.length; index += 1) {
+          var threadId = this.privateThreadOrder[index];
+          var thread = threadId ? this.privateThreads[threadId] : null;
+          var name = thread && thread.peerNick ? trimText(thread.peerNick.name) : "";
+          if (name.length && !seen[name.toUpperCase()]) {
+            seen[name.toUpperCase()] = true;
+            names.push(name);
+          }
+        }
+        if (this.chat) {
+          for (key in this.chat.channels) {
+            if (Object.prototype.hasOwnProperty.call(this.chat.channels, key)) {
+              var channel = this.chat.channels[key];
+              if (!channel || !channel.users) {
+                continue;
+              }
+              for (index = 0; index < channel.users.length; index += 1) {
+                var rosterEntry = this.extractRosterEntry(channel.users[index]);
+                var name = rosterEntry ? trimText(rosterEntry.name) : "";
+                if (name.length && !seen[name.toUpperCase()]) {
+                  seen[name.toUpperCase()] = true;
+                  names.push(name);
+                }
+              }
+            }
+          }
+        }
+        names.sort(function(left, right) {
+          return right.length - left.length;
+        });
+        return names;
+      };
       AvatarChatApp2.prototype.performAction = function(actionId) {
         switch (actionId) {
           case "who":
@@ -1384,7 +1852,7 @@ load("json-chat.js");
           selectedIndex: 0,
           lines: [
             "Slash commands:",
-            "/who, /channels, /help, /join <channel>, /part [channel], /me <action>, /clear",
+            "/who, /channels, /help, /join <channel>, /part [channel], /me <action>, /msg <user> <message>, /r <message>, /clear",
             "",
             "Keys:",
             "Tab cycles joined channels.",
@@ -1519,13 +1987,15 @@ load("json-chat.js");
         for (index = 0; index < this.channelOrder.length; index += 1) {
           var channelName = this.channelOrder[index];
           var channel = channelName ? this.getChannelByName(channelName) : null;
+          var privateThread = channelName ? this.getPrivateThreadByName(channelName) : null;
           if (!channelName) {
             continue;
           }
           entries.push({
             name: channelName,
             userCount: channel && channel.users ? channel.users.length : 0,
-            isCurrent: channelName.toUpperCase() === this.currentChannel.toUpperCase()
+            isCurrent: channelName.toUpperCase() === this.currentChannel.toUpperCase(),
+            metaText: privateThread ? privateThread.unreadCount > 0 ? "new " + String(privateThread.unreadCount) : "pm" : channel && channel.users ? String(channel.users.length) : "0"
           });
         }
         return entries;
@@ -1539,6 +2009,16 @@ load("json-chat.js");
         channel.messages.push(buildNoticeMessage(text));
         trimChannelMessages(channel, this.config.maxHistory);
         this.transcriptSignature = "";
+      };
+      AvatarChatApp2.prototype.appendViewNotice = function(viewName, text) {
+        var privateThread = this.getPrivateThreadByName(viewName);
+        if (privateThread) {
+          privateThread.messages.push(buildNoticeMessage(text));
+          trimChannelMessages(privateThread, this.config.maxHistory);
+          this.transcriptSignature = "";
+          return;
+        }
+        this.appendNotice(viewName, text);
       };
       AvatarChatApp2.prototype.scrollTranscriptOlder = function(step) {
         this.setTranscriptScrollOffset(this.transcriptScrollOffsetBlocks + Math.max(1, step));
@@ -1583,6 +2063,7 @@ load("json-chat.js");
           }
           if (channelName.toUpperCase() === this.currentChannel.toUpperCase()) {
             this.currentChannel = this.channelOrder[(index + 1) % this.channelOrder.length] || this.config.defaultChannel;
+            this.markPrivateThreadRead(this.currentChannel);
             this.scrollTranscriptToLatest();
             this.transcriptSignature = "";
             this.headerSignature = "";
@@ -1590,6 +2071,7 @@ load("json-chat.js");
           }
         }
         this.currentChannel = this.channelOrder[0] || this.config.defaultChannel;
+        this.markPrivateThreadRead(this.currentChannel);
         this.scrollTranscriptToLatest();
       };
       AvatarChatApp2.prototype.syncChannelOrder = function() {
@@ -1614,14 +2096,22 @@ load("json-chat.js");
             }
           }
         }
+        for (index = 0; index < this.privateThreadOrder.length; index += 1) {
+          var threadId = this.privateThreadOrder[index];
+          var thread = threadId ? this.privateThreads[threadId] : null;
+          if (thread && !this.channelExists(nextOrder, thread.name)) {
+            nextOrder.push(thread.name);
+          }
+        }
         this.channelOrder = nextOrder;
         if (!this.channelOrder.length) {
           this.currentChannel = "";
           this.transcriptScrollOffsetBlocks = 0;
           return;
         }
-        if (!this.currentChannel.length || !this.getChannelByName(this.currentChannel)) {
+        if (!this.currentChannel.length || !this.getChannelByName(this.currentChannel) && !this.getPrivateThreadByName(this.currentChannel)) {
           this.currentChannel = this.channelOrder[0] || "";
+          this.markPrivateThreadRead(this.currentChannel);
           this.scrollTranscriptToLatest();
         }
       };
@@ -1791,8 +2281,14 @@ load("json-chat.js");
       AvatarChatApp2.prototype.renderHeader = function() {
         var headerFrame = this.frames.header;
         var channel = this.currentChannel.length ? this.getChannelByName(this.currentChannel) : null;
+        var privateThread = this.currentChannel.length ? this.getPrivateThreadByName(this.currentChannel) : null;
         var users = channel && channel.users ? channel.users.length : 0;
-        var text = clipText(" Avatar Chat | " + (this.currentChannel || "offline") + " | users " + String(users) + " | joined " + String(this.channelOrder.length) + " | " + this.config.host + ":" + String(this.config.port), this.frames.width);
+        var text = "";
+        if (privateThread) {
+          text = clipText(" Avatar Chat | pm " + privateThread.peerNick.name + " | messages " + String(privateThread.messages.length) + " | joined " + String(this.channelOrder.length) + " | " + this.config.host + ":" + String(this.config.port), this.frames.width);
+        } else {
+          text = clipText(" Avatar Chat | " + (this.currentChannel || "offline") + " | users " + String(users) + " | joined " + String(this.channelOrder.length) + " | " + this.config.host + ":" + String(this.config.port), this.frames.width);
+        }
         if (!headerFrame) {
           return;
         }
@@ -1819,7 +2315,9 @@ load("json-chat.js");
       AvatarChatApp2.prototype.renderTranscript = function() {
         var transcriptFrame = this.frames.transcript;
         var channel = this.currentChannel.length ? this.getChannelByName(this.currentChannel) : null;
-        var signature = this.buildTranscriptSignature(channel);
+        var privateThread = this.currentChannel.length ? this.getPrivateThreadByName(this.currentChannel) : null;
+        var messages = channel ? channel.messages : privateThread ? privateThread.messages : [];
+        var signature = this.buildTranscriptSignature(messages);
         var renderState;
         var emptyText = "";
         if (!transcriptFrame) {
@@ -1830,12 +2328,14 @@ load("json-chat.js");
         }
         if (!this.chat) {
           emptyText = this.buildDisconnectedText();
-        } else if (!channel) {
+        } else if (!channel && !privateThread) {
           emptyText = "No joined channels. Use /join <channel>.";
+        } else if (privateThread) {
+          emptyText = "No private messages yet.";
         } else {
           emptyText = "No messages yet.";
         }
-        renderState = renderTranscript(transcriptFrame, channel ? channel.messages : [], {
+        renderState = renderTranscript(transcriptFrame, messages, {
           ownAlias: user.alias,
           ownUserNumber: user.number,
           avatarLib: this.avatarLib,
@@ -1907,11 +2407,11 @@ load("json-chat.js");
         });
         this.modalSignature = signature;
       };
-      AvatarChatApp2.prototype.buildTranscriptSignature = function(channel) {
+      AvatarChatApp2.prototype.buildTranscriptSignature = function(messages) {
         var lastMessage = "";
         var lastTime = 0;
-        if (channel && channel.messages.length) {
-          var message = channel.messages[channel.messages.length - 1];
+        if (messages.length) {
+          var message = messages[messages.length - 1];
           if (message) {
             lastMessage = message.str || "";
             lastTime = message.time || 0;
@@ -1923,12 +2423,13 @@ load("json-chat.js");
           this.currentChannel,
           String(!!this.chat),
           String(this.transcriptScrollOffsetBlocks),
-          channel ? String(channel.messages.length) : "0",
+          String(messages.length),
           String(lastTime),
           lastMessage
         ].join("|");
       };
       AvatarChatApp2.prototype.buildStatusText = function() {
+        var unreadPmCount = this.getUnreadPrivateThreadCount();
         if (this.modalState) {
           switch (this.modalState.kind) {
             case "roster":
@@ -1947,7 +2448,35 @@ load("json-chat.js");
         if (this.transcriptScrollOffsetBlocks > 0) {
           return "History " + String(this.transcriptScrollOffsetBlocks) + " back | Up/PgUp older | Down/PgDn newer | End latest";
         }
-        return "Up/PgUp history | /who /channels /help | /join /part /me /clear | Tab next | Esc exit";
+        if (this.getPrivateThreadByName(this.currentChannel)) {
+          return "Private chat | /msg <user> <message> | /r <message> | /channels | Tab next | Esc exit";
+        }
+        if (unreadPmCount > 0) {
+          return "Private unread " + String(unreadPmCount) + " | /msg <user> <message> | /r <message> | Tab next | Esc exit";
+        }
+        return "Up/PgUp history | /who /channels /help | /join /part /me /msg /r /clear | Tab next | Esc exit";
+      };
+      AvatarChatApp2.prototype.getUnreadPrivateThreadCount = function() {
+        var total = 0;
+        var index = 0;
+        for (index = 0; index < this.privateThreadOrder.length; index += 1) {
+          var threadId = this.privateThreadOrder[index];
+          var thread = threadId ? this.privateThreads[threadId] : null;
+          if (thread) {
+            total += thread.unreadCount;
+          }
+        }
+        return total;
+      };
+      AvatarChatApp2.prototype.markPrivateThreadRead = function(viewName) {
+        var thread = this.getPrivateThreadByName(viewName);
+        if (!thread || thread.unreadCount === 0) {
+          return;
+        }
+        thread.unreadCount = 0;
+        this.headerSignature = "";
+        this.statusSignature = "";
+        this.actionSignature = "";
       };
       AvatarChatApp2.prototype.buildDisconnectedText = function() {
         var seconds = 0;
@@ -2006,7 +2535,7 @@ load("json-chat.js");
     }()
   );
 
-  // repo/xtrn/avatar_chat/build/io/config.js
+  // build/io/config.js
   var DEFAULT_CONFIG = {
     host: "127.0.0.1",
     port: 10088,
@@ -2072,7 +2601,7 @@ load("json-chat.js");
     return config;
   }
 
-  // repo/xtrn/avatar_chat/build/main.js
+  // build/main.js
   function main() {
     var app = new AvatarChatApp(loadConfig());
     try {

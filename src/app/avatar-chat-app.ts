@@ -1,4 +1,5 @@
 import { buildNoticeMessage, normalizeChannelName, trimChannelMessages } from "../domain/chat-model";
+import { buildPrivateMessage, buildPrivateThreadId, buildPrivateThreadName, isPrivateMessage, normalizePrivateNick, resolvePrivatePeerNick } from "../domain/private-messages";
 import { ACTION_BAR_ACTIONS, AppModalState, ChannelListEntry, RosterEntry } from "../domain/ui";
 import { InputBuffer } from "../input/input-buffer";
 import { AvatarChatConfig } from "../io/config";
@@ -25,6 +26,14 @@ interface ModalGeometry {
   y: number;
   width: number;
   height: number;
+}
+
+interface PrivateThread {
+  id: string;
+  name: string;
+  peerNick: ChatNick;
+  messages: ChatMessage[];
+  unreadCount: number;
 }
 
 const INPUT_ESCAPE_SEQUENCE_MAP: { [sequence: string]: string } = {
@@ -73,6 +82,9 @@ export class AvatarChatApp {
   private readonly avatarCache: AvatarCache;
   private avatarLib: AvatarLibrary | null;
   private chat: JSONChat | null;
+  private privateThreads: { [id: string]: PrivateThread };
+  private privateThreadOrder: string[];
+  private lastPrivateSender: ChatNick | null;
   private frames: FrameState;
   private channelOrder: string[];
   private currentChannel: string;
@@ -92,6 +104,8 @@ export class AvatarChatApp {
   private pendingEscapeSequence: string;
   private pendingEscapeAt: number;
   private lastWasCarriageReturn: boolean;
+  private privateMessageKeys: { [key: string]: boolean };
+  private lastPrivateHistorySyncAt: number;
 
   public constructor(config: AvatarChatConfig) {
     this.config = config;
@@ -99,6 +113,9 @@ export class AvatarChatApp {
     this.avatarCache = {};
     this.avatarLib = null;
     this.chat = null;
+    this.privateThreads = {};
+    this.privateThreadOrder = [];
+    this.lastPrivateSender = null;
     this.frames = {
       root: null,
       header: null,
@@ -129,6 +146,8 @@ export class AvatarChatApp {
     this.pendingEscapeSequence = "";
     this.pendingEscapeAt = 0;
     this.lastWasCarriageReturn = false;
+    this.privateMessageKeys = {};
+    this.lastPrivateHistorySyncAt = 0;
 
     try {
       this.avatarLib = load({}, "avatar_lib.js") as AvatarLibrary;
@@ -158,7 +177,7 @@ export class AvatarChatApp {
   }
 
   private connect(): void {
-    const desiredChannels = this.channelOrder.length ? this.channelOrder.slice(0) : [this.config.defaultChannel];
+    const desiredChannels = this.getJoinedPublicChannelNames();
     const desiredCurrent = this.currentChannel;
     let client;
     let index = 0;
@@ -167,6 +186,12 @@ export class AvatarChatApp {
       client = new JSONClient(this.config.host, this.config.port);
       this.chat = new JSONChat(user.number, client);
       this.chat.settings.MAX_HISTORY = this.config.maxHistory;
+      this.installPrivateMessageHook();
+      this.privateThreads = {};
+      this.privateThreadOrder = [];
+      this.lastPrivateSender = null;
+      this.privateMessageKeys = {};
+      this.lastPrivateHistorySyncAt = 0;
 
       for (index = 0; index < desiredChannels.length; index += 1) {
         const desiredChannel = desiredChannels[index];
@@ -177,13 +202,15 @@ export class AvatarChatApp {
         }
       }
 
+      this.loadPrivateHistory();
       this.syncChannelOrder();
 
-      if (desiredCurrent && this.getChannelByName(desiredCurrent)) {
+      if (desiredCurrent && (this.getChannelByName(desiredCurrent) || this.getPrivateThreadByName(desiredCurrent))) {
         this.currentChannel = desiredCurrent;
       } else if (this.channelOrder.length > 0) {
         this.currentChannel = this.channelOrder[0] || this.config.defaultChannel;
       }
+      this.markPrivateThreadRead(this.currentChannel);
 
       this.transcriptScrollOffsetBlocks = 0;
       this.transcriptVisibleBlockCount = 0;
@@ -204,6 +231,7 @@ export class AvatarChatApp {
 
     try {
       this.chat.cycle();
+      this.syncPrivateHistory();
       this.syncChannelOrder();
       this.trimHistories();
     } catch (error) {
@@ -213,6 +241,256 @@ export class AvatarChatApp {
       }
       this.chat = null;
       this.scheduleReconnect("Connection lost: " + String(error));
+    }
+  }
+
+  private installPrivateMessageHook(): void {
+    let originalUpdate: ((packet: any) => boolean) | null = null;
+
+    if (!this.chat || typeof this.chat.update !== "function") {
+      return;
+    }
+
+    originalUpdate = this.chat.update.bind(this.chat);
+    this.chat.update = (packet: any): boolean => {
+      if (this.handlePrivateMailboxPacket(packet)) {
+        return true;
+      }
+
+      return originalUpdate ? originalUpdate(packet) : false;
+    };
+  }
+
+  private loadPrivateHistory(): void {
+    const historyLimit = Math.max(50, this.config.maxHistory * 2);
+    let history: any[] = [];
+    let index = 0;
+
+    if (!this.chat) {
+      return;
+    }
+
+    this.ensureHistoryArray(this.getMailboxHistoryPath());
+
+    try {
+      history = this.chat.client.slice("chat", this.getMailboxHistoryPath(), -historyLimit, undefined, 1) || [];
+    } catch (_error) {
+      history = [];
+    }
+
+    for (index = 0; index < history.length; index += 1) {
+      const message = history[index] as ChatMessage;
+
+      if (!isPrivateMessage(message)) {
+        continue;
+      }
+
+      this.appendPrivateMessage(message, false);
+    }
+
+    this.lastPrivateHistorySyncAt = new Date().getTime();
+  }
+
+  private handlePrivateMailboxPacket(packet: any): boolean {
+    let message: ChatMessage | null = null;
+
+    if (!packet || packet.oper !== "WRITE" || packet.location !== this.getMailboxMessagesPath()) {
+      return false;
+    }
+
+    message = packet.data as ChatMessage;
+    if (!isPrivateMessage(message)) {
+      return false;
+    }
+
+    this.appendPrivateMessage(message, true);
+    return true;
+  }
+
+  private appendPrivateMessage(message: ChatMessage, markUnread: boolean): void {
+    const peerNick = resolvePrivatePeerNick(message, user.alias);
+    let thread;
+
+    if (!peerNick) {
+      return;
+    }
+
+    if (!this.rememberPrivateMessage(message)) {
+      return;
+    }
+
+    thread = this.ensurePrivateThread(peerNick);
+    thread.messages.push(message);
+    trimChannelMessages(thread as any, this.config.maxHistory);
+
+    if (
+      markUnread &&
+      message.nick &&
+      message.nick.name &&
+      message.nick.name.toUpperCase() !== user.alias.toUpperCase() &&
+      this.currentChannel.toUpperCase() !== thread.name.toUpperCase()
+    ) {
+      thread.unreadCount += 1;
+      this.lastPrivateSender = peerNick;
+    }
+
+    if (message.nick && message.nick.name && message.nick.name.toUpperCase() !== user.alias.toUpperCase()) {
+      this.lastPrivateSender = peerNick;
+    }
+
+    this.syncChannelOrder();
+    this.resetRenderSignatures();
+  }
+
+  private ensurePrivateThread(peerNick: ChatNick): PrivateThread {
+    const normalizedPeer = normalizePrivateNick(peerNick) || peerNick;
+    const canonicalPeer = this.resolvePrivateTargetNick(normalizedPeer.name) || normalizedPeer;
+    const threadId = buildPrivateThreadId(canonicalPeer);
+    let thread = this.privateThreads[threadId];
+    let previousName = "";
+
+    if (!thread) {
+      thread = {
+        id: threadId,
+        name: buildPrivateThreadName(canonicalPeer),
+        peerNick: canonicalPeer,
+        messages: [],
+        unreadCount: 0
+      };
+      this.privateThreads[threadId] = thread;
+      this.privateThreadOrder.push(threadId);
+    } else {
+      previousName = thread.name;
+      thread.peerNick = canonicalPeer;
+      thread.name = buildPrivateThreadName(canonicalPeer);
+      if (previousName.length && this.currentChannel.toUpperCase() === previousName.toUpperCase()) {
+        this.currentChannel = thread.name;
+      }
+    }
+
+    return thread;
+  }
+
+  private getPrivateThreadByName(name: string): PrivateThread | null {
+    let index = 0;
+
+    for (index = 0; index < this.privateThreadOrder.length; index += 1) {
+      const threadId = this.privateThreadOrder[index];
+      const thread = threadId ? this.privateThreads[threadId] : null;
+
+      if (thread && thread.name.toUpperCase() === name.toUpperCase()) {
+        return thread;
+      }
+    }
+
+    return null;
+  }
+
+  private getJoinedPublicChannelNames(): string[] {
+    const publicChannels: string[] = [];
+    let index = 0;
+
+    for (index = 0; index < this.channelOrder.length; index += 1) {
+      const channelName = this.channelOrder[index];
+      if (channelName && channelName.charAt(0) !== "@") {
+        publicChannels.push(channelName);
+      }
+    }
+
+    if (!publicChannels.length) {
+      publicChannels.push(normalizeChannelName(this.config.defaultChannel));
+    }
+
+    return publicChannels;
+  }
+
+  private getMailboxMessagesPath(): string {
+    return "channels." + user.alias + ".messages";
+  }
+
+  private getMailboxHistoryPath(): string {
+    return "channels." + user.alias + ".history";
+  }
+
+  private ensureHistoryArray(location: string): void {
+    let existing;
+
+    if (!this.chat) {
+      return;
+    }
+
+    try {
+      existing = this.chat.client.read("chat", location, 1);
+    } catch (_readError) {
+      existing = null;
+    }
+
+    if (existing instanceof Array) {
+      return;
+    }
+
+    this.chat.client.write("chat", location, [], 2);
+  }
+
+  private buildPrivateMessageKey(message: ChatMessage): string {
+    const sender = normalizePrivateNick(message.nick || null);
+    const recipient = normalizePrivateNick(message.private ? message.private.to : null);
+    const senderKey = sender
+      ? (this.normalizePrivateLookupKey(sender.name) + "|" + (sender.qwkid || String(sender.host || "").toUpperCase()))
+      : "";
+    const recipientKey = recipient
+      ? (this.normalizePrivateLookupKey(recipient.name) + "|" + (recipient.qwkid || String(recipient.host || "").toUpperCase()))
+      : "";
+
+    return [
+      String(message.time || 0),
+      senderKey,
+      recipientKey,
+      String(message.str || "")
+    ].join("|");
+  }
+
+  private rememberPrivateMessage(message: ChatMessage): boolean {
+    const key = this.buildPrivateMessageKey(message);
+
+    if (this.privateMessageKeys[key]) {
+      return false;
+    }
+
+    this.privateMessageKeys[key] = true;
+    return true;
+  }
+
+  private syncPrivateHistory(): void {
+    const now = new Date().getTime();
+    const historyLimit = Math.max(50, this.config.maxHistory * 2);
+    let history: any[] = [];
+    let index = 0;
+
+    if (!this.chat) {
+      return;
+    }
+
+    if (this.lastPrivateHistorySyncAt && now - this.lastPrivateHistorySyncAt < 1000) {
+      return;
+    }
+
+    this.lastPrivateHistorySyncAt = now;
+
+    try {
+      history = this.chat.client.slice("chat", this.getMailboxHistoryPath(), -historyLimit, undefined, 1) || [];
+    } catch (_error) {
+      history = [];
+    }
+
+    for (index = 0; index < history.length; index += 1) {
+      const message = history[index] as ChatMessage;
+
+      if (!isPrivateMessage(message)) {
+        continue;
+      }
+
+      this.appendPrivateMessage(message, true);
     }
   }
 
@@ -448,6 +726,7 @@ export class AvatarChatApp {
           const selected = this.modalState.entries[this.modalState.selectedIndex];
           if (selected) {
             this.currentChannel = selected.name;
+            this.markPrivateThreadRead(this.currentChannel);
             this.scrollTranscriptToLatest();
           }
         }
@@ -464,6 +743,7 @@ export class AvatarChatApp {
   private submitInput(): void {
     const text = this.inputBuffer.getValue();
     const trimmed = trimText(text);
+    const privateThread = this.currentChannel.length ? this.getPrivateThreadByName(this.currentChannel) : null;
 
     if (!trimmed.length) {
       this.inputBuffer.clear();
@@ -484,7 +764,11 @@ export class AvatarChatApp {
 
     this.scrollTranscriptToLatest();
 
-    if (!this.sendMessage(this.currentChannel, trimmed)) {
+    if (privateThread) {
+      if (!this.sendPrivateMessage(privateThread.peerNick, trimmed)) {
+        this.appendViewNotice(this.currentChannel, "Unable to send private message.");
+      }
+    } else if (!this.sendMessage(this.currentChannel, trimmed)) {
       this.appendNotice(this.currentChannel, "Unable to send message.");
     }
 
@@ -522,6 +806,46 @@ export class AvatarChatApp {
     }
   }
 
+  private sendPrivateMessage(targetNick: ChatNick, text: string): boolean {
+    const recipient = normalizePrivateNick(targetNick);
+    const sender = normalizePrivateNick({
+      name: user.alias,
+      host: system.name,
+      ip: user.ip_address,
+      qwkid: system.qwk_id
+    });
+    const timestamp = new Date().getTime();
+    let thread;
+    let message;
+
+    if (!this.chat || !recipient || !sender) {
+      return false;
+    }
+
+    message = buildPrivateMessage(sender, recipient, text, timestamp);
+
+    try {
+      this.ensureHistoryArray("channels." + recipient.name + ".history");
+      this.ensureHistoryArray(this.getMailboxHistoryPath());
+      this.chat.client.write("chat", "channels." + recipient.name + ".messages", message, 2);
+      this.chat.client.push("chat", "channels." + recipient.name + ".history", message, 2);
+      this.chat.client.push("chat", this.getMailboxHistoryPath(), message, 2);
+      this.rememberPrivateMessage(message);
+      thread = this.ensurePrivateThread(recipient);
+      thread.messages.push(message);
+      thread.unreadCount = 0;
+      trimChannelMessages(thread as any, this.config.maxHistory);
+      this.currentChannel = thread.name;
+      this.syncChannelOrder();
+      this.transcriptSignature = "";
+      this.statusSignature = "";
+      this.headerSignature = "";
+      return true;
+    } catch (_error) {
+      return false;
+    }
+  }
+
   private handleSlashCommand(commandText: string): void {
     const trimmedCommand = trimText(commandText.substr(1));
     const parts = trimmedCommand.split(/\s+/);
@@ -531,6 +855,16 @@ export class AvatarChatApp {
     let targetChannel = "";
 
     if (!verb.length) {
+      return;
+    }
+
+    if (verb === "MSG" || verb === "PM" || verb === "TELL" || verb === "WHISPER") {
+      this.handlePrivateCommand(args);
+      return;
+    }
+
+    if (verb === "R" || verb === "REPLY") {
+      this.handlePrivateReplyCommand(args);
       return;
     }
 
@@ -612,6 +946,227 @@ export class AvatarChatApp {
     this.resetRenderSignatures();
   }
 
+  private handlePrivateCommand(args: string): void {
+    const parsed = this.parsePrivateCommandArgs(args);
+    let recipientName = "";
+    let messageText = "";
+    let targetNick;
+
+    if (!this.chat) {
+      this.lastError = "Not connected to chat";
+      return;
+    }
+
+    if (!parsed) {
+      this.appendViewNotice(this.currentChannel, "Usage: /msg <user> <message>");
+      return;
+    }
+
+    recipientName = parsed.recipientName;
+    messageText = parsed.messageText;
+
+    targetNick = this.resolvePrivateTargetNick(recipientName);
+    if (!targetNick) {
+      this.appendViewNotice(this.currentChannel, "User not found: " + recipientName + ".");
+      return;
+    }
+
+    if (!this.sendPrivateMessage(targetNick, messageText)) {
+      this.appendViewNotice(this.currentChannel, "Unable to send private message to " + recipientName + ".");
+      return;
+    }
+
+    this.scrollTranscriptToLatest();
+  }
+
+  private handlePrivateReplyCommand(args: string): void {
+    if (!this.chat) {
+      this.lastError = "Not connected to chat";
+      return;
+    }
+
+    if (!args.length) {
+      this.appendViewNotice(this.currentChannel, "Usage: /r <message>");
+      return;
+    }
+
+    if (!this.lastPrivateSender || !this.sendPrivateMessage(this.lastPrivateSender, args)) {
+      this.appendViewNotice(this.currentChannel, "Nobody has private messaged you yet.");
+      return;
+    }
+
+    this.scrollTranscriptToLatest();
+  }
+
+  private resolvePrivateTargetNick(name: string): ChatNick | null {
+    const trimmedName = trimText(name);
+    const normalizedTarget = this.normalizePrivateLookupKey(trimmedName);
+    let key = "";
+    let index = 0;
+
+    if (!trimmedName.length) {
+      return null;
+    }
+
+    if (this.chat) {
+      for (key in this.chat.channels) {
+        if (Object.prototype.hasOwnProperty.call(this.chat.channels, key)) {
+          const channel = this.chat.channels[key];
+          let rosterIndex = 0;
+
+          if (!channel || !channel.users) {
+            continue;
+          }
+
+          for (rosterIndex = 0; rosterIndex < channel.users.length; rosterIndex += 1) {
+            const rosterEntry = this.extractRosterEntry(channel.users[rosterIndex]);
+
+            if (
+              rosterEntry &&
+              rosterEntry.nick &&
+              (
+                rosterEntry.name.toUpperCase() === trimmedName.toUpperCase() ||
+                this.normalizePrivateLookupKey(rosterEntry.name) === normalizedTarget
+              )
+            ) {
+              return rosterEntry.nick;
+            }
+          }
+        }
+      }
+    }
+
+    for (index = 0; index < this.privateThreadOrder.length; index += 1) {
+      const threadId = this.privateThreadOrder[index];
+      const thread = threadId ? this.privateThreads[threadId] : null;
+
+      if (
+        thread &&
+        (
+          thread.peerNick.name.toUpperCase() === trimmedName.toUpperCase() ||
+          this.normalizePrivateLookupKey(thread.peerNick.name) === normalizedTarget
+        )
+      ) {
+        return thread.peerNick;
+      }
+    }
+
+    return null;
+  }
+
+  private normalizePrivateLookupKey(text: string): string {
+    return trimText(text).replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+  }
+
+  private parsePrivateCommandArgs(args: string): { recipientName: string; messageText: string } | null {
+    const trimmedArgs = trimText(args);
+    let recipientName = "";
+    let messageText = "";
+    let closingQuoteIndex = 0;
+    let spaceIndex = 0;
+    let candidateNames;
+    let candidateIndex = 0;
+
+    if (!trimmedArgs.length) {
+      return null;
+    }
+
+    if (trimmedArgs.charAt(0) === "\"") {
+      closingQuoteIndex = trimmedArgs.indexOf("\"", 1);
+      if (closingQuoteIndex < 2) {
+        return null;
+      }
+      recipientName = trimText(trimmedArgs.substring(1, closingQuoteIndex));
+      messageText = trimText(trimmedArgs.substr(closingQuoteIndex + 1));
+      return recipientName.length && messageText.length
+        ? { recipientName: recipientName, messageText: messageText }
+        : null;
+    }
+
+    candidateNames = this.listPrivateTargetNames();
+    for (candidateIndex = 0; candidateIndex < candidateNames.length; candidateIndex += 1) {
+      const candidateName = candidateNames[candidateIndex] || "";
+
+      if (!candidateName.length) {
+        continue;
+      }
+
+      if (trimmedArgs.substr(0, candidateName.length).toUpperCase() !== candidateName.toUpperCase()) {
+        continue;
+      }
+
+      if (trimmedArgs.length > candidateName.length && trimmedArgs.charAt(candidateName.length) !== " ") {
+        continue;
+      }
+
+      recipientName = candidateName;
+      messageText = trimText(trimmedArgs.substr(candidateName.length));
+      if (recipientName.length && messageText.length) {
+        return {
+          recipientName: recipientName,
+          messageText: messageText
+        };
+      }
+    }
+
+    spaceIndex = trimmedArgs.indexOf(" ");
+    if (spaceIndex < 1) {
+      return null;
+    }
+
+    recipientName = trimText(trimmedArgs.substr(0, spaceIndex));
+    messageText = trimText(trimmedArgs.substr(spaceIndex + 1));
+    return recipientName.length && messageText.length
+      ? { recipientName: recipientName, messageText: messageText }
+      : null;
+  }
+
+  private listPrivateTargetNames(): string[] {
+    const seen: { [key: string]: boolean } = {};
+    const names: string[] = [];
+    let index = 0;
+    let key = "";
+
+    for (index = 0; index < this.privateThreadOrder.length; index += 1) {
+      const threadId = this.privateThreadOrder[index];
+      const thread = threadId ? this.privateThreads[threadId] : null;
+      const name = thread && thread.peerNick ? trimText(thread.peerNick.name) : "";
+
+      if (name.length && !seen[name.toUpperCase()]) {
+        seen[name.toUpperCase()] = true;
+        names.push(name);
+      }
+    }
+
+    if (this.chat) {
+      for (key in this.chat.channels) {
+        if (Object.prototype.hasOwnProperty.call(this.chat.channels, key)) {
+          const channel = this.chat.channels[key];
+
+          if (!channel || !channel.users) {
+            continue;
+          }
+
+          for (index = 0; index < channel.users.length; index += 1) {
+            const rosterEntry = this.extractRosterEntry(channel.users[index]);
+            const name = rosterEntry ? trimText(rosterEntry.name) : "";
+
+            if (name.length && !seen[name.toUpperCase()]) {
+              seen[name.toUpperCase()] = true;
+              names.push(name);
+            }
+          }
+        }
+      }
+    }
+
+    names.sort(function (left, right) {
+      return right.length - left.length;
+    });
+
+    return names;
+  }
+
   private performAction(actionId: string): void {
     switch (actionId) {
       case "who":
@@ -685,7 +1240,7 @@ export class AvatarChatApp {
       selectedIndex: 0,
       lines: [
         "Slash commands:",
-        "/who, /channels, /help, /join <channel>, /part [channel], /me <action>, /clear",
+        "/who, /channels, /help, /join <channel>, /part [channel], /me <action>, /msg <user> <message>, /r <message>, /clear",
         "",
         "Keys:",
         "Tab cycles joined channels.",
@@ -868,6 +1423,7 @@ export class AvatarChatApp {
     for (index = 0; index < this.channelOrder.length; index += 1) {
       const channelName = this.channelOrder[index];
       const channel = channelName ? this.getChannelByName(channelName) : null;
+      const privateThread = channelName ? this.getPrivateThreadByName(channelName) : null;
 
       if (!channelName) {
         continue;
@@ -876,7 +1432,10 @@ export class AvatarChatApp {
       entries.push({
         name: channelName,
         userCount: channel && channel.users ? channel.users.length : 0,
-        isCurrent: channelName.toUpperCase() === this.currentChannel.toUpperCase()
+        isCurrent: channelName.toUpperCase() === this.currentChannel.toUpperCase(),
+        metaText: privateThread
+          ? (privateThread.unreadCount > 0 ? ("new " + String(privateThread.unreadCount)) : "pm")
+          : (channel && channel.users ? String(channel.users.length) : "0")
       });
     }
 
@@ -894,6 +1453,19 @@ export class AvatarChatApp {
     channel.messages.push(buildNoticeMessage(text));
     trimChannelMessages(channel, this.config.maxHistory);
     this.transcriptSignature = "";
+  }
+
+  private appendViewNotice(viewName: string, text: string): void {
+    const privateThread = this.getPrivateThreadByName(viewName);
+
+    if (privateThread) {
+      privateThread.messages.push(buildNoticeMessage(text));
+      trimChannelMessages(privateThread as any, this.config.maxHistory);
+      this.transcriptSignature = "";
+      return;
+    }
+
+    this.appendNotice(viewName, text);
   }
 
   private scrollTranscriptOlder(step: number): void {
@@ -953,6 +1525,7 @@ export class AvatarChatApp {
 
       if (channelName.toUpperCase() === this.currentChannel.toUpperCase()) {
         this.currentChannel = this.channelOrder[(index + 1) % this.channelOrder.length] || this.config.defaultChannel;
+        this.markPrivateThreadRead(this.currentChannel);
         this.scrollTranscriptToLatest();
         this.transcriptSignature = "";
         this.headerSignature = "";
@@ -961,6 +1534,7 @@ export class AvatarChatApp {
     }
 
     this.currentChannel = this.channelOrder[0] || this.config.defaultChannel;
+    this.markPrivateThreadRead(this.currentChannel);
     this.scrollTranscriptToLatest();
   }
 
@@ -990,6 +1564,15 @@ export class AvatarChatApp {
       }
     }
 
+    for (index = 0; index < this.privateThreadOrder.length; index += 1) {
+      const threadId = this.privateThreadOrder[index];
+      const thread = threadId ? this.privateThreads[threadId] : null;
+
+      if (thread && !this.channelExists(nextOrder, thread.name)) {
+        nextOrder.push(thread.name);
+      }
+    }
+
     this.channelOrder = nextOrder;
 
     if (!this.channelOrder.length) {
@@ -998,8 +1581,9 @@ export class AvatarChatApp {
       return;
     }
 
-    if (!this.currentChannel.length || !this.getChannelByName(this.currentChannel)) {
+    if (!this.currentChannel.length || (!this.getChannelByName(this.currentChannel) && !this.getPrivateThreadByName(this.currentChannel))) {
       this.currentChannel = this.channelOrder[0] || "";
+      this.markPrivateThreadRead(this.currentChannel);
       this.scrollTranscriptToLatest();
     }
   }
@@ -1226,20 +1810,39 @@ export class AvatarChatApp {
   private renderHeader(): void {
     const headerFrame = this.frames.header;
     const channel = this.currentChannel.length ? this.getChannelByName(this.currentChannel) : null;
+    const privateThread = this.currentChannel.length ? this.getPrivateThreadByName(this.currentChannel) : null;
     const users = channel && channel.users ? channel.users.length : 0;
-    const text = clipText(
-      " Avatar Chat | " +
-      (this.currentChannel || "offline") +
-      " | users " +
-      String(users) +
-      " | joined " +
-      String(this.channelOrder.length) +
-      " | " +
-      this.config.host +
-      ":" +
-      String(this.config.port),
-      this.frames.width
-    );
+    let text = "";
+
+    if (privateThread) {
+      text = clipText(
+        " Avatar Chat | pm " +
+        privateThread.peerNick.name +
+        " | messages " +
+        String(privateThread.messages.length) +
+        " | joined " +
+        String(this.channelOrder.length) +
+        " | " +
+        this.config.host +
+        ":" +
+        String(this.config.port),
+        this.frames.width
+      );
+    } else {
+      text = clipText(
+        " Avatar Chat | " +
+        (this.currentChannel || "offline") +
+        " | users " +
+        String(users) +
+        " | joined " +
+        String(this.channelOrder.length) +
+        " | " +
+        this.config.host +
+        ":" +
+        String(this.config.port),
+        this.frames.width
+      );
+    }
 
     if (!headerFrame) {
       return;
@@ -1274,7 +1877,9 @@ export class AvatarChatApp {
   private renderTranscript(): void {
     const transcriptFrame = this.frames.transcript;
     const channel = this.currentChannel.length ? this.getChannelByName(this.currentChannel) : null;
-    const signature = this.buildTranscriptSignature(channel);
+    const privateThread = this.currentChannel.length ? this.getPrivateThreadByName(this.currentChannel) : null;
+    const messages = channel ? channel.messages : (privateThread ? privateThread.messages : []);
+    const signature = this.buildTranscriptSignature(messages);
     let renderState: TranscriptRenderState;
     let emptyText = "";
 
@@ -1288,15 +1893,17 @@ export class AvatarChatApp {
 
     if (!this.chat) {
       emptyText = this.buildDisconnectedText();
-    } else if (!channel) {
+    } else if (!channel && !privateThread) {
       emptyText = "No joined channels. Use /join <channel>.";
+    } else if (privateThread) {
+      emptyText = "No private messages yet.";
     } else {
       emptyText = "No messages yet.";
     }
 
     renderState = renderTranscript(
       transcriptFrame,
-      channel ? channel.messages : [],
+      messages,
       {
         ownAlias: user.alias,
         ownUserNumber: user.number,
@@ -1394,12 +2001,12 @@ export class AvatarChatApp {
     this.modalSignature = signature;
   }
 
-  private buildTranscriptSignature(channel: ChatChannel | null): string {
+  private buildTranscriptSignature(messages: ChatMessage[]): string {
     let lastMessage = "";
     let lastTime = 0;
 
-    if (channel && channel.messages.length) {
-      const message = channel.messages[channel.messages.length - 1];
+    if (messages.length) {
+      const message = messages[messages.length - 1];
       if (message) {
         lastMessage = message.str || "";
         lastTime = message.time || 0;
@@ -1412,13 +2019,15 @@ export class AvatarChatApp {
       this.currentChannel,
       String(!!this.chat),
       String(this.transcriptScrollOffsetBlocks),
-      channel ? String(channel.messages.length) : "0",
+      String(messages.length),
       String(lastTime),
       lastMessage
     ].join("|");
   }
 
   private buildStatusText(): string {
+    const unreadPmCount = this.getUnreadPrivateThreadCount();
+
     if (this.modalState) {
       switch (this.modalState.kind) {
         case "roster":
@@ -1440,7 +2049,44 @@ export class AvatarChatApp {
       return "History " + String(this.transcriptScrollOffsetBlocks) + " back | Up/PgUp older | Down/PgDn newer | End latest";
     }
 
-    return "Up/PgUp history | /who /channels /help | /join /part /me /clear | Tab next | Esc exit";
+    if (this.getPrivateThreadByName(this.currentChannel)) {
+      return "Private chat | /msg <user> <message> | /r <message> | /channels | Tab next | Esc exit";
+    }
+
+    if (unreadPmCount > 0) {
+      return "Private unread " + String(unreadPmCount) + " | /msg <user> <message> | /r <message> | Tab next | Esc exit";
+    }
+
+    return "Up/PgUp history | /who /channels /help | /join /part /me /msg /r /clear | Tab next | Esc exit";
+  }
+
+  private getUnreadPrivateThreadCount(): number {
+    let total = 0;
+    let index = 0;
+
+    for (index = 0; index < this.privateThreadOrder.length; index += 1) {
+      const threadId = this.privateThreadOrder[index];
+      const thread = threadId ? this.privateThreads[threadId] : null;
+
+      if (thread) {
+        total += thread.unreadCount;
+      }
+    }
+
+    return total;
+  }
+
+  private markPrivateThreadRead(viewName: string): void {
+    const thread = this.getPrivateThreadByName(viewName);
+
+    if (!thread || thread.unreadCount === 0) {
+      return;
+    }
+
+    thread.unreadCount = 0;
+    this.headerSignature = "";
+    this.statusSignature = "";
+    this.actionSignature = "";
   }
 
   private buildDisconnectedText(): string {

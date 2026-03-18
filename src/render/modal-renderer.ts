@@ -248,12 +248,14 @@ function renderChannelsModal(frame: Frame, modal: ChannelsModalState): void {
   for (row = 0; row < bodyHeight; row += 1) {
     const entry = modal.entries[topIndex + row];
     let label = "";
+    let metaText = "";
 
     if (!entry) {
       break;
     }
 
-    label = (entry.isCurrent ? "* " : "  ") + entry.name + " (" + String(entry.userCount) + ")";
+    metaText = entry.metaText ? entry.metaText : String(entry.userCount);
+    label = (entry.isCurrent ? "* " : "  ") + entry.name + " (" + metaText + ")";
     drawListRow(frame, 2, 2 + row, frame.width - 2, label, topIndex + row === selectedIndex, entry.isCurrent ? LIGHTCYAN : WHITE);
   }
 

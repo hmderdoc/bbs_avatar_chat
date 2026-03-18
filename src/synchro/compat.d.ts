@@ -148,10 +148,15 @@ interface ChatNick {
   qwkid?: string;
 }
 
+interface ChatPrivateMeta {
+  to: ChatNick;
+}
+
 interface ChatMessage {
   nick?: ChatNick;
   str: string;
   time: number;
+  private?: ChatPrivateMeta;
 }
 
 interface ChatUserEntry {
@@ -174,8 +179,10 @@ declare class JSONClient {
   connect(): boolean;
   disconnect(): boolean;
   cycle(): void;
+  read(scope: string, location: string, lock?: number): any;
   write(scope: string, location: string, data: any, lock?: number): any;
   push(scope: string, location: string, data: any, lock?: number): any;
+  slice(scope: string, location: string, start?: number, end?: number, lock?: number): any[];
 }
 
 declare class JSONChat {
@@ -194,4 +201,5 @@ declare class JSONChat {
   cycle(): boolean;
   submit(target: string, text: string): boolean;
   getcmd(target: string, text: string): boolean;
+  update(packet: any): boolean;
 }
