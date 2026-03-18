@@ -1,12 +1,12 @@
 // Avatar Chat - Auto-generated, do not edit directly.
-// Built: 2026-03-18T00:52:29.861Z
+// Built: 2026-03-18T02:12:55.073Z
 load("sbbsdefs.js");
 load("key_defs.js");
 load("frame.js");
 load("json-client.js");
 load("json-chat.js");
 (function() {
-  // build/util/text.js
+  // repo/xtrn/avatar_chat/build/util/text.js
   function clamp(value, minimum, maximum) {
     if (value < minimum) {
       return minimum;
@@ -107,7 +107,7 @@ load("json-chat.js");
     return hourText + ":" + minuteText + (isPm ? " pm" : " am");
   }
 
-  // build/domain/chat-model.js
+  // repo/xtrn/avatar_chat/build/domain/chat-model.js
   function normalizeChannelName(name, fallback) {
     var trimmed = trimText(name);
     if (trimmed.length) {
@@ -182,7 +182,7 @@ load("json-chat.js");
     return groups;
   }
 
-  // build/domain/ui.js
+  // repo/xtrn/avatar_chat/build/domain/ui.js
   var ACTION_BAR_ACTIONS = [
     { id: "who", label: "/who" },
     { id: "channels", label: "/channels" },
@@ -191,7 +191,7 @@ load("json-chat.js");
     { id: "exit", label: "Esc exit" }
   ];
 
-  // build/input/input-buffer.js
+  // repo/xtrn/avatar_chat/build/input/input-buffer.js
   var InputBuffer = (
     /** @class */
     function() {
@@ -285,7 +285,7 @@ load("json-chat.js");
     }()
   );
 
-  // build/render/avatar.js
+  // repo/xtrn/avatar_chat/build/render/avatar.js
   function resolveAvatarDimensions(avatarLib) {
     if (avatarLib && avatarLib.defs) {
       return {
@@ -396,7 +396,7 @@ load("json-chat.js");
     }
   }
 
-  // build/render/modal-renderer.js
+  // repo/xtrn/avatar_chat/build/render/modal-renderer.js
   var BOX_TOP_LEFT = "\xDA";
   var BOX_TOP_RIGHT = "\xBF";
   var BOX_BOTTOM_LEFT = "\xC0";
@@ -622,12 +622,13 @@ load("json-chat.js");
     renderHelpModal(modalFrame, modal);
   }
 
-  // build/render/transcript-renderer.js
-  function measureLineWidth(lines) {
+  // repo/xtrn/avatar_chat/build/render/transcript-renderer.js
+  function measureBubbleWidth(rows) {
     var width = 0;
     var index = 0;
-    for (index = 0; index < lines.length; index += 1) {
-      var line = lines[index] || "";
+    for (index = 0; index < rows.length; index += 1) {
+      var row = rows[index];
+      var line = row && row.isBubble ? row.text || "" : "";
       if (line.length > width) {
         width = line.length;
       }
@@ -660,7 +661,7 @@ load("json-chat.js");
     return blocks;
   }
   function buildBubbleLayout(group, maxBubbleWidth, avatarHeight, options) {
-    var lines = [];
+    var rows = [];
     var lastMessage = group.messages.length ? group.messages[group.messages.length - 1] : null;
     var timestamp = lastMessage ? formatClockTime(lastMessage.time) : "";
     var index = 0;
@@ -671,16 +672,25 @@ load("json-chat.js");
       var message = group.messages[messageIndex];
       var messageLines = wrapText(message ? message.text : "", Math.max(8, maxBubbleWidth - 2));
       for (index = 0; index < messageLines.length; index += 1) {
-        lines.push(messageLines[index] || "");
+        rows.push({
+          text: messageLines[index] || "",
+          isBubble: true
+        });
       }
       if (messageIndex < group.messages.length - 1) {
-        lines.push("");
+        rows.push({
+          text: "",
+          isBubble: false
+        });
       }
     }
-    if (!lines.length) {
-      lines.push("");
+    if (!rows.length) {
+      rows.push({
+        text: "",
+        isBubble: true
+      });
     }
-    width = measureLineWidth(lines) + 2;
+    width = measureBubbleWidth(rows) + 2;
     if (width < 8) {
       width = 8;
     }
@@ -690,9 +700,9 @@ load("json-chat.js");
       side: group.side,
       speakerName: group.speakerName,
       timestamp: timestamp,
-      lines: lines,
+      rows: rows,
       width: width,
-      height: Math.max(avatarHeight, lines.length + 1),
+      height: Math.max(avatarHeight, rows.length + 1),
       avatarBinary: avatarBinary
     };
   }
@@ -760,10 +770,13 @@ load("json-chat.js");
     frame.putmsg(block.speakerName, speakerAttr);
     frame.putmsg(" ", LIGHTGRAY);
     frame.putmsg(block.timestamp, LIGHTBLUE);
-    for (lineIndex = 0; lineIndex < block.lines.length; lineIndex += 1) {
-      var text = " " + padRight(block.lines[lineIndex] || "", block.width - 2) + " ";
+    for (lineIndex = 0; lineIndex < block.rows.length; lineIndex += 1) {
+      var row = block.rows[lineIndex];
+      if (!row || !row.isBubble) {
+        continue;
+      }
       frame.gotoxy(bubbleX, startRow + 1 + lineIndex);
-      frame.putmsg(text, bubbleAttr);
+      frame.putmsg(" " + padRight(row.text || "", block.width - 2) + " ", bubbleAttr);
     }
     if (block.avatarBinary) {
       blitAvatarToFrame(frame, block.avatarBinary, avatarSize.width, avatarSize.height, avatarX, startRow);
@@ -806,7 +819,7 @@ load("json-chat.js");
     return renderState;
   }
 
-  // build/app/avatar-chat-app.js
+  // repo/xtrn/avatar_chat/build/app/avatar-chat-app.js
   var INPUT_ESCAPE_SEQUENCE_MAP = {
     "\x1B[A": KEY_UP,
     "\x1B[B": KEY_DOWN,
@@ -1993,7 +2006,7 @@ load("json-chat.js");
     }()
   );
 
-  // build/io/config.js
+  // repo/xtrn/avatar_chat/build/io/config.js
   var DEFAULT_CONFIG = {
     host: "127.0.0.1",
     port: 10088,
@@ -2059,7 +2072,7 @@ load("json-chat.js");
     return config;
   }
 
-  // build/main.js
+  // repo/xtrn/avatar_chat/build/main.js
   function main() {
     var app = new AvatarChatApp(loadConfig());
     try {

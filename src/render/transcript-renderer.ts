@@ -7,10 +7,15 @@ interface BubbleLayout {
   side: "left" | "right";
   speakerName: string;
   timestamp: string;
-  lines: string[];
+  rows: BubbleRow[];
   width: number;
   height: number;
   avatarBinary: string | null;
+}
+
+interface BubbleRow {
+  text: string;
+  isBubble: boolean;
 }
 
 interface NoticeLayout {
@@ -37,12 +42,13 @@ export interface TranscriptRenderState {
   actualScrollOffsetBlocks: number;
 }
 
-function measureLineWidth(lines: string[]): number {
+function measureBubbleWidth(rows: BubbleRow[]): number {
   let width = 0;
   let index = 0;
 
-  for (index = 0; index < lines.length; index += 1) {
-    const line = lines[index] || "";
+  for (index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    const line = row && row.isBubble ? (row.text || "") : "";
     if (line.length > width) {
       width = line.length;
     }
@@ -93,7 +99,7 @@ function buildBubbleLayout(
   avatarHeight: number,
   options: TranscriptRenderOptions
 ): BubbleLayout {
-  const lines: string[] = [];
+  const rows: BubbleRow[] = [];
   const lastMessage = group.messages.length ? group.messages[group.messages.length - 1] : null;
   const timestamp = lastMessage ? formatClockTime(lastMessage.time) : "";
   let index = 0;
@@ -106,19 +112,28 @@ function buildBubbleLayout(
     const messageLines = wrapText(message ? message.text : "", Math.max(8, maxBubbleWidth - 2));
 
     for (index = 0; index < messageLines.length; index += 1) {
-      lines.push(messageLines[index] || "");
+      rows.push({
+        text: messageLines[index] || "",
+        isBubble: true
+      });
     }
 
     if (messageIndex < group.messages.length - 1) {
-      lines.push("");
+      rows.push({
+        text: "",
+        isBubble: false
+      });
     }
   }
 
-  if (!lines.length) {
-    lines.push("");
+  if (!rows.length) {
+    rows.push({
+      text: "",
+      isBubble: true
+    });
   }
 
-  width = measureLineWidth(lines) + 2;
+  width = measureBubbleWidth(rows) + 2;
   if (width < 8) {
     width = 8;
   }
@@ -136,9 +151,9 @@ function buildBubbleLayout(
     side: group.side,
     speakerName: group.speakerName,
     timestamp: timestamp,
-    lines: lines,
+    rows: rows,
     width: width,
-    height: Math.max(avatarHeight, lines.length + 1),
+    height: Math.max(avatarHeight, rows.length + 1),
     avatarBinary: avatarBinary
   };
 }
@@ -231,10 +246,15 @@ function renderBubble(frame: Frame, block: BubbleLayout, startRow: number, avata
   frame.putmsg(" ", LIGHTGRAY);
   frame.putmsg(block.timestamp, LIGHTBLUE);
 
-  for (lineIndex = 0; lineIndex < block.lines.length; lineIndex += 1) {
-    const text = " " + padRight(block.lines[lineIndex] || "", block.width - 2) + " ";
+  for (lineIndex = 0; lineIndex < block.rows.length; lineIndex += 1) {
+    const row = block.rows[lineIndex];
+
+    if (!row || !row.isBubble) {
+      continue;
+    }
+
     frame.gotoxy(bubbleX, startRow + 1 + lineIndex);
-    frame.putmsg(text, bubbleAttr);
+    frame.putmsg(" " + padRight(row.text || "", block.width - 2) + " ", bubbleAttr);
   }
 
   if (block.avatarBinary) {
