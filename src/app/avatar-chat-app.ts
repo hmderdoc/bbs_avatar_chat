@@ -176,6 +176,26 @@ export class AvatarChatApp {
     }
   }
 
+  private getOwnAvatarData(): string | undefined {
+    let avatarObj = null;
+
+    if (!this.avatarLib || typeof this.avatarLib.read !== "function") {
+      return undefined;
+    }
+
+    try {
+      avatarObj = this.avatarLib.read(user.number, user.alias, null, null) || null;
+    } catch (_error) {
+      avatarObj = null;
+    }
+
+    if (!avatarObj || avatarObj.disabled || !avatarObj.data) {
+      return undefined;
+    }
+
+    return String(avatarObj.data);
+  }
+
   private connect(): void {
     const desiredChannels = this.getJoinedPublicChannelNames();
     const desiredCurrent = this.currentChannel;
@@ -778,12 +798,14 @@ export class AvatarChatApp {
   private sendMessage(channelName: string, text: string): boolean {
     const channel = this.getChannelByName(channelName);
     const timestamp = new Date().getTime();
+    const ownAvatar = this.getOwnAvatarData();
     const message = {
       nick: {
         name: user.alias,
         host: system.name,
         ip: user.ip_address,
-        qwkid: system.qwk_id
+        qwkid: system.qwk_id,
+        avatar: ownAvatar
       },
       str: text,
       time: timestamp
@@ -808,11 +830,13 @@ export class AvatarChatApp {
 
   private sendPrivateMessage(targetNick: ChatNick, text: string): boolean {
     const recipient = normalizePrivateNick(targetNick);
+    const ownAvatar = this.getOwnAvatarData();
     const sender = normalizePrivateNick({
       name: user.alias,
       host: system.name,
       ip: user.ip_address,
-      qwkid: system.qwk_id
+      qwkid: system.qwk_id,
+      avatar: ownAvatar
     });
     const timestamp = new Date().getTime();
     let thread;

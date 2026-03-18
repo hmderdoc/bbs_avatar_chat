@@ -2,6 +2,7 @@ import { trimText } from "../util/text";
 
 export function normalizePrivateNick(nick: ChatNick | null | undefined): ChatNick | null {
   const name = trimText(String(nick && nick.name ? nick.name : ""));
+  const avatar = nick && nick.avatar ? trimText(String(nick.avatar)) : "";
 
   if (!name.length) {
     return null;
@@ -11,7 +12,8 @@ export function normalizePrivateNick(nick: ChatNick | null | undefined): ChatNic
     name: name,
     host: nick && nick.host ? trimText(String(nick.host)) : undefined,
     ip: nick && nick.ip ? String(nick.ip) : undefined,
-    qwkid: nick && nick.qwkid ? trimText(String(nick.qwkid)).toUpperCase() : undefined
+    qwkid: nick && nick.qwkid ? trimText(String(nick.qwkid)).toUpperCase() : undefined,
+    avatar: avatar.length ? avatar : undefined
   };
 }
 

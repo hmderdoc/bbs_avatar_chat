@@ -6,6 +6,7 @@ declare function log(text: string): void;
 declare function base64_decode(data: string): string;
 declare function ascii(text: string): number;
 declare function mswait(milliseconds: number): void;
+declare function md5_calc(text: string): string;
 
 declare const K_NONE: number;
 declare const K_NOCRLF: number;
@@ -78,6 +79,7 @@ declare const js: SynchronetJS;
 interface SynchronetSystem {
   name: string;
   qwk_id: string;
+  data_dir: string;
   matchuser(alias: string): number;
 }
 
@@ -102,8 +104,10 @@ declare class File {
   constructor(name: string);
   name: string;
   exists: boolean;
+  eof: boolean;
   open(mode: string): boolean;
   close(): void;
+  readln(maxlen?: number): string | null;
   iniGetValue(section: string | null, key: string, defaultValue?: any): any;
   iniSetValue(section: string | null, key: string, value: any): boolean;
   iniGetObject(section?: string | null, lowercase?: boolean, blanks?: boolean): any;
@@ -139,6 +143,7 @@ interface AvatarLibrary {
     height: number;
   };
   read(usernum?: number, username?: string, netaddr?: string | null, bbsid?: string | null): AvatarObject | false | null | undefined;
+  read_netuser?(username?: string, netaddr?: string | null): AvatarObject | false | null | undefined;
 }
 
 interface ChatNick {
@@ -146,6 +151,7 @@ interface ChatNick {
   host?: string;
   ip?: string;
   qwkid?: string;
+  avatar?: string;
 }
 
 interface ChatPrivateMeta {

@@ -1,5 +1,5 @@
 // Avatar Chat - Auto-generated, do not edit directly.
-// Built: 2026-03-18T03:56:32.297Z
+// Built: 2026-03-18T18:04:52.559Z
 load("sbbsdefs.js");
 load("key_defs.js");
 load("frame.js");
@@ -185,6 +185,7 @@ load("json-chat.js");
   // build/domain/private-messages.js
   function normalizePrivateNick(nick) {
     var name = trimText(String(nick && nick.name ? nick.name : ""));
+    var avatar = nick && nick.avatar ? trimText(String(nick.avatar)) : "";
     if (!name.length) {
       return null;
     }
@@ -192,7 +193,8 @@ load("json-chat.js");
       name: name,
       host: nick && nick.host ? trimText(String(nick.host)) : void 0,
       ip: nick && nick.ip ? String(nick.ip) : void 0,
-      qwkid: nick && nick.qwkid ? trimText(String(nick.qwkid)).toUpperCase() : void 0
+      qwkid: nick && nick.qwkid ? trimText(String(nick.qwkid)).toUpperCase() : void 0,
+      avatar: avatar.length ? avatar : void 0
     };
   }
   function isPrivateMessage(message) {
@@ -337,6 +339,7 @@ load("json-chat.js");
   );
 
   // build/render/avatar.js
+  var routeMapCache = null;
   function resolveAvatarDimensions(avatarLib) {
     if (avatarLib && avatarLib.defs) {
       return {
@@ -350,7 +353,11 @@ load("json-chat.js");
     };
   }
   function avatarCacheKey(nick, ownAlias) {
+    var embeddedAvatar = nick.avatar ? String(nick.avatar).replace(/^\s+|\s+$/g, "") : "";
     var remoteKey = resolveAvatarNetaddr(nick) || nick.host || "local";
+    if (embeddedAvatar.length) {
+      return nick.name.toUpperCase() + "@EMBEDDED:" + md5_calc(embeddedAvatar);
+    }
     if (nick.name.toUpperCase() === ownAlias.toUpperCase()) {
       return "local:" + nick.name.toUpperCase();
     }
@@ -372,6 +379,87 @@ load("json-chat.js");
       return qwkid;
     }
     return nick.host || null;
+  }
+  function pushLookupCandidate(list, seen, value) {
+    var normalized = value ? String(value).replace(/^\s+|\s+$/g, "").toUpperCase() : "";
+    if (!normalized.length || seen[normalized]) {
+      return;
+    }
+    seen[normalized] = true;
+    list.push(normalized);
+  }
+  function loadRouteMap() {
+    var map = {};
+    var routeFile = new File(system.data_dir + "qnet/route.dat");
+    if (routeMapCache) {
+      return routeMapCache;
+    }
+    if (!routeFile.open("r")) {
+      routeMapCache = map;
+      return routeMapCache;
+    }
+    try {
+      while (!routeFile.eof) {
+        var line = routeFile.readln(2048);
+        var match = line ? line.match(/^\s*\d{2}\/\d{2}\/\d{2}\s+([^:\s]+):([^:\s]+)/) : null;
+        var qwkid = match ? normalizeQwkId(match[1]) : null;
+        var route = match ? normalizeQwkId(match[2]) : null;
+        if (!qwkid || !route || qwkid === route) {
+          continue;
+        }
+        if (!map[qwkid]) {
+          map[qwkid] = [];
+        }
+        if (map[qwkid].indexOf(route) === -1) {
+          map[qwkid].push(route);
+        }
+      }
+    } finally {
+      routeFile.close();
+    }
+    routeMapCache = map;
+    return routeMapCache;
+  }
+  function resolveAvatarLookupCandidates(nick) {
+    var candidates = [];
+    var seen = {};
+    var qwkid = normalizeQwkId(nick.qwkid);
+    var routeMap = qwkid ? loadRouteMap() : null;
+    var index = 0;
+    pushLookupCandidate(candidates, seen, qwkid);
+    if (qwkid && routeMap && routeMap[qwkid]) {
+      for (index = 0; index < routeMap[qwkid].length; index += 1) {
+        pushLookupCandidate(candidates, seen, routeMap[qwkid][index]);
+      }
+    }
+    pushLookupCandidate(candidates, seen, nick.host || null);
+    return candidates;
+  }
+  function lookupRemoteAvatar(avatarLib, nick, bbsId) {
+    var candidates = resolveAvatarLookupCandidates(nick);
+    var avatarObj = null;
+    var index = 0;
+    var nameHash = "";
+    if (typeof avatarLib.read_netuser !== "function") {
+      for (index = 0; index < candidates.length; index += 1) {
+        avatarObj = avatarLib.read(0, nick.name, candidates[index], bbsId) || null;
+        if (avatarObj && !avatarObj.disabled && avatarObj.data) {
+          return avatarObj;
+        }
+      }
+      return null;
+    }
+    nameHash = "md5:" + md5_calc(nick.name);
+    for (index = 0; index < candidates.length; index += 1) {
+      avatarObj = avatarLib.read_netuser(nick.name, candidates[index]) || null;
+      if (!avatarObj && nameHash.length) {
+        avatarObj = avatarLib.read_netuser(nameHash, candidates[index]) || null;
+      }
+      if (avatarObj && !avatarObj.disabled && avatarObj.data) {
+        return avatarObj;
+      }
+    }
+    return null;
   }
   function lookupAvatarBinary(avatarLib, nick, ownAlias, ownUserNumber, cache) {
     var cached;
@@ -395,7 +483,11 @@ load("json-chat.js");
       localQwkId = normalizeQwkId(system.qwk_id);
       nickQwkId = normalizeQwkId(nick.qwkid);
       netaddr = resolveAvatarNetaddr(nick);
-      if (nick.name.toUpperCase() === ownAlias.toUpperCase()) {
+      if (nick.avatar && String(nick.avatar).replace(/^\s+|\s+$/g, "").length) {
+        avatarObj = {
+          data: String(nick.avatar).replace(/^\s+|\s+$/g, "")
+        };
+      } else if (nick.name.toUpperCase() === ownAlias.toUpperCase()) {
         avatarObj = avatarLib.read(ownUserNumber, ownAlias, null, null) || null;
       } else {
         localUserNumber = 0;
@@ -405,7 +497,10 @@ load("json-chat.js");
         if (localUserNumber > 0) {
           avatarObj = avatarLib.read(localUserNumber, nick.name, null, null) || null;
         } else {
-          avatarObj = avatarLib.read(0, nick.name, netaddr, nick.host || null) || null;
+          avatarObj = lookupRemoteAvatar(avatarLib, nick, nick.host || null);
+          if (!avatarObj) {
+            avatarObj = avatarLib.read(0, nick.name, netaddr, nick.host || null) || null;
+          }
         }
       }
     } catch (_error) {
@@ -976,6 +1071,21 @@ load("json-chat.js");
           console.home();
         }
       };
+      AvatarChatApp2.prototype.getOwnAvatarData = function() {
+        var avatarObj = null;
+        if (!this.avatarLib || typeof this.avatarLib.read !== "function") {
+          return void 0;
+        }
+        try {
+          avatarObj = this.avatarLib.read(user.number, user.alias, null, null) || null;
+        } catch (_error) {
+          avatarObj = null;
+        }
+        if (!avatarObj || avatarObj.disabled || !avatarObj.data) {
+          return void 0;
+        }
+        return String(avatarObj.data);
+      };
       AvatarChatApp2.prototype.connect = function() {
         var desiredChannels = this.getJoinedPublicChannelNames();
         var desiredCurrent = this.currentChannel;
@@ -1473,12 +1583,14 @@ load("json-chat.js");
       AvatarChatApp2.prototype.sendMessage = function(channelName, text) {
         var channel = this.getChannelByName(channelName);
         var timestamp = (/* @__PURE__ */ new Date()).getTime();
+        var ownAvatar = this.getOwnAvatarData();
         var message = {
           nick: {
             name: user.alias,
             host: system.name,
             ip: user.ip_address,
-            qwkid: system.qwk_id
+            qwkid: system.qwk_id,
+            avatar: ownAvatar
           },
           str: text,
           time: timestamp
@@ -1500,11 +1612,13 @@ load("json-chat.js");
       };
       AvatarChatApp2.prototype.sendPrivateMessage = function(targetNick, text) {
         var recipient = normalizePrivateNick(targetNick);
+        var ownAvatar = this.getOwnAvatarData();
         var sender = normalizePrivateNick({
           name: user.alias,
           host: system.name,
           ip: user.ip_address,
-          qwkid: system.qwk_id
+          qwkid: system.qwk_id,
+          avatar: ownAvatar
         });
         var timestamp = (/* @__PURE__ */ new Date()).getTime();
         var thread;

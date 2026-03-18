@@ -7,6 +7,12 @@ export interface AvatarDimensions {
   height: number;
 }
 
+interface RouteMap {
+  [qwkid: string]: string[];
+}
+
+let routeMapCache: RouteMap | null = null;
+
 export function resolveAvatarDimensions(avatarLib: AvatarLibrary | null): AvatarDimensions {
   if (avatarLib && avatarLib.defs) {
     return {
@@ -22,7 +28,12 @@ export function resolveAvatarDimensions(avatarLib: AvatarLibrary | null): Avatar
 }
 
 function avatarCacheKey(nick: ChatNick, ownAlias: string): string {
+  const embeddedAvatar = nick.avatar ? String(nick.avatar).replace(/^\s+|\s+$/g, "") : "";
   const remoteKey = resolveAvatarNetaddr(nick) || nick.host || "local";
+
+  if (embeddedAvatar.length) {
+    return nick.name.toUpperCase() + "@EMBEDDED:" + md5_calc(embeddedAvatar);
+  }
 
   if (nick.name.toUpperCase() === ownAlias.toUpperCase()) {
     return "local:" + nick.name.toUpperCase();
@@ -51,6 +62,106 @@ function resolveAvatarNetaddr(nick: ChatNick): string | null {
   }
 
   return nick.host || null;
+}
+
+function pushLookupCandidate(list: string[], seen: { [key: string]: boolean }, value: string | null | undefined): void {
+  const normalized = value ? String(value).replace(/^\s+|\s+$/g, "").toUpperCase() : "";
+
+  if (!normalized.length || seen[normalized]) {
+    return;
+  }
+
+  seen[normalized] = true;
+  list.push(normalized);
+}
+
+function loadRouteMap(): RouteMap {
+  const map: RouteMap = {};
+  const routeFile = new File(system.data_dir + "qnet/route.dat");
+
+  if (routeMapCache) {
+    return routeMapCache;
+  }
+
+  if (!routeFile.open("r")) {
+    routeMapCache = map;
+    return routeMapCache;
+  }
+
+  try {
+    while (!routeFile.eof) {
+      const line = routeFile.readln(2048);
+      const match = line ? line.match(/^\s*\d{2}\/\d{2}\/\d{2}\s+([^:\s]+):([^:\s]+)/) : null;
+      const qwkid = match ? normalizeQwkId(match[1]) : null;
+      const route = match ? normalizeQwkId(match[2]) : null;
+
+      if (!qwkid || !route || qwkid === route) {
+        continue;
+      }
+
+      if (!map[qwkid]) {
+        map[qwkid] = [];
+      }
+
+      if (map[qwkid].indexOf(route) === -1) {
+        map[qwkid].push(route);
+      }
+    }
+  } finally {
+    routeFile.close();
+  }
+
+  routeMapCache = map;
+  return routeMapCache;
+}
+
+function resolveAvatarLookupCandidates(nick: ChatNick): string[] {
+  const candidates: string[] = [];
+  const seen: { [key: string]: boolean } = {};
+  const qwkid = normalizeQwkId(nick.qwkid);
+  const routeMap = qwkid ? loadRouteMap() : null;
+  let index = 0;
+
+  pushLookupCandidate(candidates, seen, qwkid);
+
+  if (qwkid && routeMap && routeMap[qwkid]) {
+    for (index = 0; index < routeMap[qwkid].length; index += 1) {
+      pushLookupCandidate(candidates, seen, routeMap[qwkid][index]);
+    }
+  }
+
+  pushLookupCandidate(candidates, seen, nick.host || null);
+  return candidates;
+}
+
+function lookupRemoteAvatar(avatarLib: AvatarLibrary, nick: ChatNick, bbsId: string | null): AvatarObject | null {
+  const candidates = resolveAvatarLookupCandidates(nick);
+  let avatarObj: AvatarObject | false | null | undefined = null;
+  let index = 0;
+  let nameHash = "";
+
+  if (typeof avatarLib.read_netuser !== "function") {
+    for (index = 0; index < candidates.length; index += 1) {
+      avatarObj = avatarLib.read(0, nick.name, candidates[index], bbsId) || null;
+      if (avatarObj && !avatarObj.disabled && avatarObj.data) {
+        return avatarObj;
+      }
+    }
+    return null;
+  }
+
+  nameHash = "md5:" + md5_calc(nick.name);
+  for (index = 0; index < candidates.length; index += 1) {
+    avatarObj = avatarLib.read_netuser(nick.name, candidates[index]) || null;
+    if (!avatarObj && nameHash.length) {
+      avatarObj = avatarLib.read_netuser(nameHash, candidates[index]) || null;
+    }
+    if (avatarObj && !avatarObj.disabled && avatarObj.data) {
+      return avatarObj;
+    }
+  }
+
+  return null;
 }
 
 export function lookupAvatarBinary(
@@ -86,7 +197,11 @@ export function lookupAvatarBinary(
     nickQwkId = normalizeQwkId(nick.qwkid);
     netaddr = resolveAvatarNetaddr(nick);
 
-    if (nick.name.toUpperCase() === ownAlias.toUpperCase()) {
+    if (nick.avatar && String(nick.avatar).replace(/^\s+|\s+$/g, "").length) {
+      avatarObj = {
+        data: String(nick.avatar).replace(/^\s+|\s+$/g, "")
+      } as AvatarObject;
+    } else if (nick.name.toUpperCase() === ownAlias.toUpperCase()) {
       avatarObj = avatarLib.read(ownUserNumber, ownAlias, null, null) || null;
     } else {
       localUserNumber = 0;
@@ -98,7 +213,10 @@ export function lookupAvatarBinary(
       if (localUserNumber > 0) {
         avatarObj = avatarLib.read(localUserNumber, nick.name, null, null) || null;
       } else {
-        avatarObj = avatarLib.read(0, nick.name, netaddr, nick.host || null) || null;
+        avatarObj = lookupRemoteAvatar(avatarLib, nick, nick.host || null);
+        if (!avatarObj) {
+          avatarObj = avatarLib.read(0, nick.name, netaddr, nick.host || null) || null;
+        }
       }
     }
   } catch (_error) {
