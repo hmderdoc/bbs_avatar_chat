@@ -4,6 +4,15 @@ Avatar Chat is a Synchronet external program that connects to the JSON chat serv
 
 This project is currently pre-alpha. The shipped default configuration points at `futureland.today:10088` so new testers can install it and immediately connect to the live test server.
 
+## SCFG Setup
+
+- In SCFG, add a new External Program with the following options, leaving all other options at their default values:
+
+    Name: AvatarChat
+    Internal Code: AVATARCHAT
+    Start-up Directory: /sbbs/xtrn/avatar_chat
+    Command Line: ?avatar_chat.js
+
 ## What It Needs
 
 - Synchronet with JavaScript enabled
