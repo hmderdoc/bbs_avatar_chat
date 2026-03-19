@@ -105,6 +105,8 @@ export class AvatarChatApp {
   private pendingEscapeAt: number;
   private lastWasCarriageReturn: boolean;
   private privateMessageKeys: { [key: string]: boolean };
+  private publicChannelMessageKeys: { [key: string]: boolean };
+  private publicChannelUnreadCounts: { [key: string]: number };
   private lastPrivateHistorySyncAt: number;
 
   public constructor(config: AvatarChatConfig) {
@@ -147,6 +149,8 @@ export class AvatarChatApp {
     this.pendingEscapeAt = 0;
     this.lastWasCarriageReturn = false;
     this.privateMessageKeys = {};
+    this.publicChannelMessageKeys = {};
+    this.publicChannelUnreadCounts = {};
     this.lastPrivateHistorySyncAt = 0;
 
     try {
@@ -211,6 +215,8 @@ export class AvatarChatApp {
       this.privateThreadOrder = [];
       this.lastPrivateSender = null;
       this.privateMessageKeys = {};
+      this.publicChannelMessageKeys = {};
+      this.publicChannelUnreadCounts = {};
       this.lastPrivateHistorySyncAt = 0;
 
       for (index = 0; index < desiredChannels.length; index += 1) {
@@ -223,6 +229,7 @@ export class AvatarChatApp {
       }
 
       this.loadPrivateHistory();
+      this.syncPublicChannelUnreadCounts(false);
       this.syncChannelOrder();
 
       if (desiredCurrent && (this.getChannelByName(desiredCurrent) || this.getPrivateThreadByName(desiredCurrent))) {
@@ -230,7 +237,7 @@ export class AvatarChatApp {
       } else if (this.channelOrder.length > 0) {
         this.currentChannel = this.channelOrder[0] || this.config.defaultChannel;
       }
-      this.markPrivateThreadRead(this.currentChannel);
+      this.markCurrentViewRead(this.currentChannel);
 
       this.transcriptScrollOffsetBlocks = 0;
       this.transcriptVisibleBlockCount = 0;
@@ -251,6 +258,7 @@ export class AvatarChatApp {
 
     try {
       this.chat.cycle();
+      this.syncPublicChannelUnreadCounts(true);
       this.syncPrivateHistory();
       this.syncChannelOrder();
       this.trimHistories();
@@ -450,6 +458,81 @@ export class AvatarChatApp {
     }
 
     this.chat.client.write("chat", location, [], 2);
+  }
+
+  private buildPublicMessageKey(channelName: string, message: ChatMessage): string {
+    const sender = normalizePrivateNick(message.nick || null);
+    const senderKey = sender
+      ? (this.normalizePrivateLookupKey(sender.name) + "|" + (sender.qwkid || String(sender.host || "").toUpperCase()))
+      : "NOTICE";
+
+    return [
+      normalizeChannelName(channelName).toUpperCase(),
+      String(message.time || 0),
+      senderKey,
+      String(message.str || "")
+    ].join("|");
+  }
+
+  private rememberPublicChannelMessage(channelName: string, message: ChatMessage): boolean {
+    const key = this.buildPublicMessageKey(channelName, message);
+
+    if (this.publicChannelMessageKeys[key]) {
+      return false;
+    }
+
+    this.publicChannelMessageKeys[key] = true;
+    return true;
+  }
+
+  private syncPublicChannelUnreadCounts(markUnread: boolean): void {
+    let key = "";
+    let changed = false;
+
+    if (!this.chat) {
+      return;
+    }
+
+    for (key in this.chat.channels) {
+      if (!Object.prototype.hasOwnProperty.call(this.chat.channels, key)) {
+        continue;
+      }
+
+      const channel: ChatChannel | null = this.chat.channels[key] as ChatChannel;
+      const unreadKey = channel && channel.name ? channel.name.toUpperCase() : "";
+      let index = 0;
+
+      if (!channel || !channel.name || channel.name.charAt(0) === "@") {
+        continue;
+      }
+
+      if (this.publicChannelUnreadCounts[unreadKey] === undefined) {
+        this.publicChannelUnreadCounts[unreadKey] = 0;
+      }
+
+      for (index = 0; index < channel.messages.length; index += 1) {
+        const message = channel.messages[index];
+
+        if (!message || !this.rememberPublicChannelMessage(channel.name, message)) {
+          continue;
+        }
+
+        if (
+          markUnread &&
+          channel.name.toUpperCase() !== this.currentChannel.toUpperCase() &&
+          message.nick &&
+          message.nick.name &&
+          message.nick.name.toUpperCase() !== user.alias.toUpperCase()
+        ) {
+          this.publicChannelUnreadCounts[unreadKey] += 1;
+          changed = true;
+        }
+      }
+    }
+
+    if (changed) {
+      this.modalSignature = "";
+    }
   }
 
   private buildPrivateMessageKey(message: ChatMessage): string {
@@ -739,17 +822,19 @@ export class AvatarChatApp {
       case KEY_PAGEDN:
         this.moveModalSelection(5);
         return true;
-      case KEY_ESC:
-      case "\x1b":
       case "\r":
         if ((this.modalState.kind === "channels" || this.modalState.kind === "private") && this.modalState.entries.length) {
           const selected = this.modalState.entries[this.modalState.selectedIndex];
           if (selected) {
             this.currentChannel = selected.name;
-            this.markPrivateThreadRead(this.currentChannel);
+            this.markCurrentViewRead(this.currentChannel);
             this.scrollTranscriptToLatest();
           }
         }
+        this.closeModal();
+        return true;
+      case KEY_ESC:
+      case "\x1b":
         this.closeModal();
         return true;
       case "\x0c":
@@ -860,6 +945,7 @@ export class AvatarChatApp {
       thread.unreadCount = 0;
       trimChannelMessages(thread as any, this.config.maxHistory);
       this.currentChannel = thread.name;
+      this.markCurrentViewRead(this.currentChannel);
       this.syncChannelOrder();
       this.transcriptSignature = "";
       this.statusSignature = "";
@@ -957,6 +1043,7 @@ export class AvatarChatApp {
       this.syncChannelOrder();
       if (this.getChannelByName(targetChannel)) {
         this.currentChannel = targetChannel;
+        this.markCurrentViewRead(this.currentChannel);
         this.scrollTranscriptToLatest();
       }
       return;
@@ -966,6 +1053,7 @@ export class AvatarChatApp {
       this.syncChannelOrder();
       if (!this.getChannelByName(this.currentChannel)) {
         this.currentChannel = this.channelOrder.length ? (this.channelOrder[0] || "") : "";
+        this.markCurrentViewRead(this.currentChannel);
         this.scrollTranscriptToLatest();
       }
       this.resetRenderSignatures();
@@ -1597,6 +1685,7 @@ export class AvatarChatApp {
     for (key in this.chat.channels) {
       if (Object.prototype.hasOwnProperty.call(this.chat.channels, key)) {
         const channel = this.chat.channels[key];
+        const unreadCount = channel && channel.name ? (this.publicChannelUnreadCounts[channel.name.toUpperCase()] || 0) : 0;
 
         if (!channel || !channel.name || channel.name.charAt(0) === "@") {
           continue;
@@ -1606,7 +1695,9 @@ export class AvatarChatApp {
           name: channel.name,
           userCount: channel.users ? channel.users.length : 0,
           isCurrent: channel.name.toUpperCase() === this.currentChannel.toUpperCase(),
-          metaText: channel.users ? String(channel.users.length) : "0"
+          metaText: unreadCount > 0
+            ? ((channel.users ? String(channel.users.length) : "0") + " | new " + String(unreadCount))
+            : (channel.users ? String(channel.users.length) : "0")
         });
       }
     }
@@ -1755,7 +1846,7 @@ export class AvatarChatApp {
 
       if (channelName.toUpperCase() === this.currentChannel.toUpperCase()) {
         this.currentChannel = this.channelOrder[(index + 1) % this.channelOrder.length] || this.config.defaultChannel;
-        this.markPrivateThreadRead(this.currentChannel);
+        this.markCurrentViewRead(this.currentChannel);
         this.scrollTranscriptToLatest();
         this.transcriptSignature = "";
         this.headerSignature = "";
@@ -1764,7 +1855,7 @@ export class AvatarChatApp {
     }
 
     this.currentChannel = this.channelOrder[0] || this.config.defaultChannel;
-    this.markPrivateThreadRead(this.currentChannel);
+    this.markCurrentViewRead(this.currentChannel);
     this.scrollTranscriptToLatest();
   }
 
@@ -1813,7 +1904,7 @@ export class AvatarChatApp {
 
     if (!this.currentChannel.length || (!this.getChannelByName(this.currentChannel) && !this.getPrivateThreadByName(this.currentChannel))) {
       this.currentChannel = this.channelOrder[0] || "";
-      this.markPrivateThreadRead(this.currentChannel);
+      this.markCurrentViewRead(this.currentChannel);
       this.scrollTranscriptToLatest();
     }
   }
@@ -2327,6 +2418,26 @@ export class AvatarChatApp {
     }
 
     return total;
+  }
+
+  private markCurrentViewRead(viewName: string): void {
+    this.markPrivateThreadRead(viewName);
+    this.markPublicChannelRead(viewName);
+  }
+
+  private markPublicChannelRead(viewName: string): void {
+    const normalizedName = trimText(viewName).toUpperCase();
+
+    if (!normalizedName.length || normalizedName.charAt(0) === "@") {
+      return;
+    }
+
+    if (!this.publicChannelUnreadCounts[normalizedName]) {
+      return;
+    }
+
+    this.publicChannelUnreadCounts[normalizedName] = 0;
+    this.modalSignature = "";
   }
 
   private markPrivateThreadRead(viewName: string): void {

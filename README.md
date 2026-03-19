@@ -44,6 +44,37 @@ default_channel = main
 
 If you want other systems or off-box clients to reach your service, use a public hostname or IP instead of `127.0.0.1` and open the port in your firewall/NAT as needed.
 
+## Web Page
+
+Avatar Chat also ships with a small web bundle under:
+
+- `web/pages/avatarchat.xjs`
+- `web/root/api/avatarchat.ssjs`
+- `web/lib/events/avatarchat.js`
+
+To install it into the stock Synchronet web interface, copy those files into the matching locations under `webv4`:
+
+- `pages/avatarchat.xjs`
+- `root/api/avatarchat.ssjs`
+- `lib/events/avatarchat.js`
+
+The web bundle reads the same `avatar_chat.ini` as the terminal client, so both clients use the same host, port, and default channel.
+
+The page depends on stock `webv4` assets that are already present in Synchronet:
+
+- `root/js/common.js`
+- `root/js/graphics-converter.js`
+- `root/js/avatars.js`
+- `root/api/events.ssjs`
+
+After copying the files, browse to:
+
+- `./?page=avatarchat.xjs`
+
+You can also override the channel in the URL:
+
+- `./?page=avatarchat.xjs&channel=main`
+
 ## Persistence
 
 There is no separate Avatar Chat database to initialize.

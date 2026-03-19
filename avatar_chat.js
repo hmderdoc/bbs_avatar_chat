@@ -1,5 +1,5 @@
 // Avatar Chat - Auto-generated, do not edit directly.
-// Built: 2026-03-18T20:14:43.041Z
+// Built: 2026-03-19T00:02:03.216Z
 load("sbbsdefs.js");
 load("key_defs.js");
 load("frame.js");
@@ -642,6 +642,98 @@ load("json-chat.js");
       frame.putmsg(SELECTED_POINTER, markerAttr);
     }
   }
+  function writeStyledToken(frame, x, y, width, token) {
+    var visible = clipText(token.text, width);
+    if (x < 1 || y < 1 || width < 1 || !visible.length) {
+      return 0;
+    }
+    frame.gotoxy(x, y);
+    frame.putmsg(visible, token.attr);
+    return visible.length;
+  }
+  function writeStyledTokens(frame, x, y, width, tokens) {
+    var writeX = x;
+    var remaining = width;
+    var index = 0;
+    for (index = 0; index < tokens.length; index += 1) {
+      var token = tokens[index];
+      if (!token) {
+        continue;
+      }
+      var written = writeStyledToken(frame, writeX, y, remaining, token);
+      if (!written) {
+        continue;
+      }
+      writeX += written;
+      remaining -= written;
+      if (remaining < 1) {
+        break;
+      }
+    }
+  }
+  function extractUnreadCount(metaText) {
+    var match = String(metaText || "").match(/new\s+(\d+)/i);
+    if (!match) {
+      return 0;
+    }
+    return parseInt(match[1] || "0", 10) || 0;
+  }
+  function drawCommandFooter(frame, textTokens) {
+    drawHorizontalRule(frame, frame.height - 1, 2, frame.width - 2);
+    writeStyledTokens(frame, 3, frame.height - 1, Math.max(1, frame.width - 4), textTokens);
+  }
+  function drawChannelLikeRow(frame, x, y, width, entry, primaryLabel, selected) {
+    var rowWidth = Math.max(1, width);
+    var contentWidth = Math.max(0, rowWidth - 1);
+    var unreadCount = extractUnreadCount(entry.metaText);
+    var baseBg = selected ? BG_BLUE : BG_BLACK;
+    var pointerAttr = BG_BLACK | LIGHTMAGENTA;
+    var nameAttr = baseBg | (selected ? LIGHTCYAN : LIGHTRED);
+    var primaryLabelAttr = baseBg | (selected ? LIGHTGRAY : CYAN);
+    var primaryValueAttr = baseBg | (selected ? WHITE : LIGHTCYAN);
+    var secondaryLabelAttr = baseBg | (selected ? CYAN : BROWN);
+    var secondaryValueAttr = baseBg | (selected ? LIGHTGREEN : YELLOW);
+    var separatorAttr = baseBg | LIGHTGRAY;
+    var prefixText = entry.isCurrent ? "* " : "  ";
+    var primaryTokens = [];
+    var secondaryTokens = [];
+    var nameWidth = 0;
+    var nameText = "";
+    frame.gotoxy(x, y);
+    frame.putmsg(selected ? SELECTED_POINTER : " ", pointerAttr);
+    fillCells(frame, x + 1, y, Math.max(0, rowWidth - 1), baseBg | BLACK);
+    primaryTokens = [
+      { text: " ", attr: baseBg | BLACK },
+      { text: primaryLabel + ": ", attr: primaryLabelAttr },
+      { text: String(entry.userCount), attr: primaryValueAttr }
+    ];
+    if (unreadCount > 0) {
+      secondaryTokens = [
+        { text: " | ", attr: separatorAttr },
+        { text: "New: ", attr: secondaryLabelAttr },
+        { text: String(unreadCount), attr: secondaryValueAttr }
+      ];
+    }
+    nameWidth = contentWidth - prefixText.length - primaryTokens.reduce(function(total, token) {
+      return total + token.text.length;
+    }, 0) - secondaryTokens.reduce(function(total, token) {
+      return total + token.text.length;
+    }, 0);
+    if (secondaryTokens.length && nameWidth < 6) {
+      nameWidth += secondaryTokens.reduce(function(total, token) {
+        return total + token.text.length;
+      }, 0);
+      secondaryTokens = [];
+    }
+    if (nameWidth < 1) {
+      nameWidth = 1;
+    }
+    nameText = clipText(entry.name, nameWidth);
+    writeStyledTokens(frame, x + 1, y, contentWidth, [
+      { text: prefixText, attr: nameAttr },
+      { text: nameText, attr: nameAttr }
+    ].concat(primaryTokens, secondaryTokens));
+  }
   function renderActionTokens(frame, actions) {
     var x = 1;
     var index = 0;
@@ -731,27 +823,34 @@ load("json-chat.js");
     var topIndex = modal.entries.length > bodyHeight ? Math.max(0, Math.min(selectedIndex - Math.floor(bodyHeight / 2), modal.entries.length - bodyHeight)) : 0;
     var row = 0;
     drawBorder(frame, modal.title);
-    drawHorizontalRule(frame, frame.height - 1, 2, frame.width - 2);
     if (!modal.entries.length) {
       frame.gotoxy(2, Math.max(2, Math.floor(frame.height / 2)));
       frame.putmsg(centerText("No joined channels.", frame.width - 2), DARKGRAY);
-      frame.gotoxy(3, frame.height - 1);
-      frame.putmsg(clipText("Esc close | use /join <channel>", frame.width - 4), LIGHTBLUE);
+      drawCommandFooter(frame, [
+        { text: "Esc", attr: YELLOW },
+        { text: " close | ", attr: LIGHTBLUE },
+        { text: "/join", attr: YELLOW },
+        { text: " start", attr: LIGHTBLUE }
+      ]);
       return;
     }
     for (row = 0; row < bodyHeight; row += 1) {
       var entry = modal.entries[topIndex + row];
-      var label = "";
-      var metaText = "";
       if (!entry) {
         break;
       }
-      metaText = entry.metaText ? entry.metaText : String(entry.userCount);
-      label = (entry.isCurrent ? "* " : "  ") + entry.name + " (" + metaText + ")";
-      drawListRow(frame, 2, 2 + row, frame.width - 2, label, topIndex + row === selectedIndex, entry.isCurrent ? LIGHTCYAN : WHITE);
+      drawChannelLikeRow(frame, 2, 2 + row, frame.width - 2, entry, "Users", topIndex + row === selectedIndex);
     }
-    frame.gotoxy(3, frame.height - 1);
-    frame.putmsg(clipText("Enter switch | Esc close | use /join and /part for edits", frame.width - 4), LIGHTBLUE);
+    drawCommandFooter(frame, [
+      { text: "Enter", attr: YELLOW },
+      { text: " switch | ", attr: LIGHTBLUE },
+      { text: "Esc", attr: YELLOW },
+      { text: " close | ", attr: LIGHTBLUE },
+      { text: "/join", attr: YELLOW },
+      { text: " ", attr: LIGHTBLUE },
+      { text: "/part", attr: YELLOW },
+      { text: " manage", attr: LIGHTBLUE }
+    ]);
   }
   function renderPrivateThreadsModal(frame, modal) {
     var bodyHeight = Math.max(1, frame.height - 3);
@@ -759,27 +858,32 @@ load("json-chat.js");
     var topIndex = modal.entries.length > bodyHeight ? Math.max(0, Math.min(selectedIndex - Math.floor(bodyHeight / 2), modal.entries.length - bodyHeight)) : 0;
     var row = 0;
     drawBorder(frame, modal.title);
-    drawHorizontalRule(frame, frame.height - 1, 2, frame.width - 2);
     if (!modal.entries.length) {
       frame.gotoxy(2, Math.max(2, Math.floor(frame.height / 2)));
       frame.putmsg(centerText("No private threads yet.", frame.width - 2), DARKGRAY);
-      frame.gotoxy(3, frame.height - 1);
-      frame.putmsg(clipText("Esc close | use /msg <user> <message>", frame.width - 4), LIGHTBLUE);
+      drawCommandFooter(frame, [
+        { text: "Esc", attr: YELLOW },
+        { text: " close | ", attr: LIGHTBLUE },
+        { text: "/msg", attr: YELLOW },
+        { text: " start", attr: LIGHTBLUE }
+      ]);
       return;
     }
     for (row = 0; row < bodyHeight; row += 1) {
       var entry = modal.entries[topIndex + row];
-      var label = "";
-      var metaText = "";
       if (!entry) {
         break;
       }
-      metaText = entry.metaText ? entry.metaText : "pm";
-      label = (entry.isCurrent ? "* " : "  ") + entry.name + " (" + metaText + ")";
-      drawListRow(frame, 2, 2 + row, frame.width - 2, label, topIndex + row === selectedIndex, entry.metaText && entry.metaText.indexOf("new ") === 0 ? YELLOW : LIGHTMAGENTA);
+      drawChannelLikeRow(frame, 2, 2 + row, frame.width - 2, entry, "Msgs", topIndex + row === selectedIndex);
     }
-    frame.gotoxy(3, frame.height - 1);
-    frame.putmsg(clipText("Enter switch | Esc close | unread threads are marked", frame.width - 4), LIGHTBLUE);
+    drawCommandFooter(frame, [
+      { text: "Enter", attr: YELLOW },
+      { text: " switch | ", attr: LIGHTBLUE },
+      { text: "Esc", attr: YELLOW },
+      { text: " close | ", attr: LIGHTBLUE },
+      { text: "/msg", attr: YELLOW },
+      { text: " start chats", attr: LIGHTBLUE }
+    ]);
   }
   function renderHelpModal(frame, modal) {
     var width = Math.max(1, frame.width - 4);
@@ -1102,6 +1206,8 @@ load("json-chat.js");
         this.pendingEscapeAt = 0;
         this.lastWasCarriageReturn = false;
         this.privateMessageKeys = {};
+        this.publicChannelMessageKeys = {};
+        this.publicChannelUnreadCounts = {};
         this.lastPrivateHistorySyncAt = 0;
         try {
           this.avatarLib = load({}, "avatar_lib.js");
@@ -1156,6 +1262,8 @@ load("json-chat.js");
           this.privateThreadOrder = [];
           this.lastPrivateSender = null;
           this.privateMessageKeys = {};
+          this.publicChannelMessageKeys = {};
+          this.publicChannelUnreadCounts = {};
           this.lastPrivateHistorySyncAt = 0;
           for (index = 0; index < desiredChannels.length; index += 1) {
             var desiredChannel = desiredChannels[index];
@@ -1165,13 +1273,14 @@ load("json-chat.js");
             }
           }
           this.loadPrivateHistory();
+          this.syncPublicChannelUnreadCounts(false);
           this.syncChannelOrder();
           if (desiredCurrent && (this.getChannelByName(desiredCurrent) || this.getPrivateThreadByName(desiredCurrent))) {
             this.currentChannel = desiredCurrent;
           } else if (this.channelOrder.length > 0) {
             this.currentChannel = this.channelOrder[0] || this.config.defaultChannel;
           }
-          this.markPrivateThreadRead(this.currentChannel);
+          this.markCurrentViewRead(this.currentChannel);
           this.transcriptScrollOffsetBlocks = 0;
           this.transcriptVisibleBlockCount = 0;
           this.transcriptMaxScrollOffsetBlocks = 0;
@@ -1189,6 +1298,7 @@ load("json-chat.js");
         }
         try {
           this.chat.cycle();
+          this.syncPublicChannelUnreadCounts(true);
           this.syncPrivateHistory();
           this.syncChannelOrder();
           this.trimHistories();
@@ -1342,6 +1452,58 @@ load("json-chat.js");
           return;
         }
         this.chat.client.write("chat", location, [], 2);
+      };
+      AvatarChatApp2.prototype.buildPublicMessageKey = function(channelName, message) {
+        var sender = normalizePrivateNick(message.nick || null);
+        var senderKey = sender ? this.normalizePrivateLookupKey(sender.name) + "|" + (sender.qwkid || String(sender.host || "").toUpperCase()) : "NOTICE";
+        return [
+          normalizeChannelName(channelName).toUpperCase(),
+          String(message.time || 0),
+          senderKey,
+          String(message.str || "")
+        ].join("|");
+      };
+      AvatarChatApp2.prototype.rememberPublicChannelMessage = function(channelName, message) {
+        var key = this.buildPublicMessageKey(channelName, message);
+        if (this.publicChannelMessageKeys[key]) {
+          return false;
+        }
+        this.publicChannelMessageKeys[key] = true;
+        return true;
+      };
+      AvatarChatApp2.prototype.syncPublicChannelUnreadCounts = function(markUnread) {
+        var key = "";
+        var changed = false;
+        if (!this.chat) {
+          return;
+        }
+        for (key in this.chat.channels) {
+          if (!Object.prototype.hasOwnProperty.call(this.chat.channels, key)) {
+            continue;
+          }
+          var channel = this.chat.channels[key];
+          var unreadKey = channel && channel.name ? channel.name.toUpperCase() : "";
+          var index = 0;
+          if (!channel || !channel.name || channel.name.charAt(0) === "@") {
+            continue;
+          }
+          if (this.publicChannelUnreadCounts[unreadKey] === void 0) {
+            this.publicChannelUnreadCounts[unreadKey] = 0;
+          }
+          for (index = 0; index < channel.messages.length; index += 1) {
+            var message = channel.messages[index];
+            if (!message || !this.rememberPublicChannelMessage(channel.name, message)) {
+              continue;
+            }
+            if (markUnread && channel.name.toUpperCase() !== this.currentChannel.toUpperCase() && message.nick && message.nick.name && message.nick.name.toUpperCase() !== user.alias.toUpperCase()) {
+              this.publicChannelUnreadCounts[unreadKey] += 1;
+              changed = true;
+            }
+          }
+        }
+        if (changed) {
+          this.modalSignature = "";
+        }
       };
       AvatarChatApp2.prototype.buildPrivateMessageKey = function(message) {
         var sender = normalizePrivateNick(message.nick || null);
@@ -1588,17 +1750,19 @@ load("json-chat.js");
           case KEY_PAGEDN:
             this.moveModalSelection(5);
             return true;
-          case KEY_ESC:
-          case "\x1B":
           case "\r":
             if ((this.modalState.kind === "channels" || this.modalState.kind === "private") && this.modalState.entries.length) {
               var selected = this.modalState.entries[this.modalState.selectedIndex];
               if (selected) {
                 this.currentChannel = selected.name;
-                this.markPrivateThreadRead(this.currentChannel);
+                this.markCurrentViewRead(this.currentChannel);
                 this.scrollTranscriptToLatest();
               }
             }
+            this.closeModal();
+            return true;
+          case KEY_ESC:
+          case "\x1B":
             this.closeModal();
             return true;
           case "\f":
@@ -1695,6 +1859,7 @@ load("json-chat.js");
           thread.unreadCount = 0;
           trimChannelMessages(thread, this.config.maxHistory);
           this.currentChannel = thread.name;
+          this.markCurrentViewRead(this.currentChannel);
           this.syncChannelOrder();
           this.transcriptSignature = "";
           this.statusSignature = "";
@@ -1782,6 +1947,7 @@ load("json-chat.js");
           this.syncChannelOrder();
           if (this.getChannelByName(targetChannel)) {
             this.currentChannel = targetChannel;
+            this.markCurrentViewRead(this.currentChannel);
             this.scrollTranscriptToLatest();
           }
           return;
@@ -1790,6 +1956,7 @@ load("json-chat.js");
           this.syncChannelOrder();
           if (!this.getChannelByName(this.currentChannel)) {
             this.currentChannel = this.channelOrder.length ? this.channelOrder[0] || "" : "";
+            this.markCurrentViewRead(this.currentChannel);
             this.scrollTranscriptToLatest();
           }
           this.resetRenderSignatures();
@@ -2279,6 +2446,7 @@ load("json-chat.js");
         for (key in this.chat.channels) {
           if (Object.prototype.hasOwnProperty.call(this.chat.channels, key)) {
             var channel = this.chat.channels[key];
+            var unreadCount = channel && channel.name ? this.publicChannelUnreadCounts[channel.name.toUpperCase()] || 0 : 0;
             if (!channel || !channel.name || channel.name.charAt(0) === "@") {
               continue;
             }
@@ -2286,7 +2454,7 @@ load("json-chat.js");
               name: channel.name,
               userCount: channel.users ? channel.users.length : 0,
               isCurrent: channel.name.toUpperCase() === this.currentChannel.toUpperCase(),
-              metaText: channel.users ? String(channel.users.length) : "0"
+              metaText: unreadCount > 0 ? (channel.users ? String(channel.users.length) : "0") + " | new " + String(unreadCount) : channel.users ? String(channel.users.length) : "0"
             });
           }
         }
@@ -2402,7 +2570,7 @@ load("json-chat.js");
           }
           if (channelName.toUpperCase() === this.currentChannel.toUpperCase()) {
             this.currentChannel = this.channelOrder[(index + 1) % this.channelOrder.length] || this.config.defaultChannel;
-            this.markPrivateThreadRead(this.currentChannel);
+            this.markCurrentViewRead(this.currentChannel);
             this.scrollTranscriptToLatest();
             this.transcriptSignature = "";
             this.headerSignature = "";
@@ -2410,7 +2578,7 @@ load("json-chat.js");
           }
         }
         this.currentChannel = this.channelOrder[0] || this.config.defaultChannel;
-        this.markPrivateThreadRead(this.currentChannel);
+        this.markCurrentViewRead(this.currentChannel);
         this.scrollTranscriptToLatest();
       };
       AvatarChatApp2.prototype.syncChannelOrder = function() {
@@ -2450,7 +2618,7 @@ load("json-chat.js");
         }
         if (!this.currentChannel.length || !this.getChannelByName(this.currentChannel) && !this.getPrivateThreadByName(this.currentChannel)) {
           this.currentChannel = this.channelOrder[0] || "";
-          this.markPrivateThreadRead(this.currentChannel);
+          this.markCurrentViewRead(this.currentChannel);
           this.scrollTranscriptToLatest();
         }
       };
@@ -2827,6 +2995,21 @@ load("json-chat.js");
           }
         }
         return total;
+      };
+      AvatarChatApp2.prototype.markCurrentViewRead = function(viewName) {
+        this.markPrivateThreadRead(viewName);
+        this.markPublicChannelRead(viewName);
+      };
+      AvatarChatApp2.prototype.markPublicChannelRead = function(viewName) {
+        var normalizedName = trimText(viewName).toUpperCase();
+        if (!normalizedName.length || normalizedName.charAt(0) === "@") {
+          return;
+        }
+        if (!this.publicChannelUnreadCounts[normalizedName]) {
+          return;
+        }
+        this.publicChannelUnreadCounts[normalizedName] = 0;
+        this.modalSignature = "";
       };
       AvatarChatApp2.prototype.markPrivateThreadRead = function(viewName) {
         var thread = this.getPrivateThreadByName(viewName);

@@ -106,6 +106,128 @@ function drawListRow(frame: Frame, x: number, y: number, width: number, text: st
   }
 }
 
+interface StyledToken {
+  text: string;
+  attr: number;
+}
+
+function writeStyledToken(frame: Frame, x: number, y: number, width: number, token: StyledToken): number {
+  const visible = clipText(token.text, width);
+
+  if (x < 1 || y < 1 || width < 1 || !visible.length) {
+    return 0;
+  }
+
+  frame.gotoxy(x, y);
+  frame.putmsg(visible, token.attr);
+  return visible.length;
+}
+
+function writeStyledTokens(frame: Frame, x: number, y: number, width: number, tokens: StyledToken[]): void {
+  let writeX = x;
+  let remaining = width;
+  let index = 0;
+
+  for (index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+
+    if (!token) {
+      continue;
+    }
+
+    const written = writeStyledToken(frame, writeX, y, remaining, token);
+
+    if (!written) {
+      continue;
+    }
+
+    writeX += written;
+    remaining -= written;
+    if (remaining < 1) {
+      break;
+    }
+  }
+}
+
+function extractUnreadCount(metaText: string | undefined): number {
+  const match = String(metaText || "").match(/new\s+(\d+)/i);
+
+  if (!match) {
+    return 0;
+  }
+
+  return parseInt(match[1] || "0", 10) || 0;
+}
+
+function drawCommandFooter(frame: Frame, textTokens: StyledToken[]): void {
+  drawHorizontalRule(frame, frame.height - 1, 2, frame.width - 2);
+  writeStyledTokens(frame, 3, frame.height - 1, Math.max(1, frame.width - 4), textTokens);
+}
+
+function drawChannelLikeRow(frame: Frame, x: number, y: number, width: number, entry: { name: string; userCount: number; isCurrent: boolean; metaText?: string }, primaryLabel: string, selected: boolean): void {
+  const rowWidth = Math.max(1, width);
+  const contentWidth = Math.max(0, rowWidth - 1);
+  const unreadCount = extractUnreadCount(entry.metaText);
+  const baseBg = selected ? BG_BLUE : BG_BLACK;
+  const pointerAttr = BG_BLACK | LIGHTMAGENTA;
+  const nameAttr = baseBg | (selected ? LIGHTCYAN : LIGHTRED);
+  const primaryLabelAttr = baseBg | (selected ? LIGHTGRAY : CYAN);
+  const primaryValueAttr = baseBg | (selected ? WHITE : LIGHTCYAN);
+  const secondaryLabelAttr = baseBg | (selected ? CYAN : BROWN);
+  const secondaryValueAttr = baseBg | (selected ? LIGHTGREEN : YELLOW);
+  const separatorAttr = baseBg | LIGHTGRAY;
+  const prefixText = entry.isCurrent ? "* " : "  ";
+  let primaryTokens: StyledToken[] = [];
+  let secondaryTokens: StyledToken[] = [];
+  let nameWidth = 0;
+  let nameText = "";
+
+  frame.gotoxy(x, y);
+  frame.putmsg(selected ? SELECTED_POINTER : " ", pointerAttr);
+  fillCells(frame, x + 1, y, Math.max(0, rowWidth - 1), baseBg | BLACK);
+
+  primaryTokens = [
+    { text: " ", attr: baseBg | BLACK },
+    { text: primaryLabel + ": ", attr: primaryLabelAttr },
+    { text: String(entry.userCount), attr: primaryValueAttr }
+  ];
+
+  if (unreadCount > 0) {
+    secondaryTokens = [
+      { text: " | ", attr: separatorAttr },
+      { text: "New: ", attr: secondaryLabelAttr },
+      { text: String(unreadCount), attr: secondaryValueAttr }
+    ];
+  }
+
+  nameWidth = contentWidth
+    - prefixText.length
+    - primaryTokens.reduce(function (total, token) { return total + token.text.length; }, 0)
+    - secondaryTokens.reduce(function (total, token) { return total + token.text.length; }, 0);
+
+  if (secondaryTokens.length && nameWidth < 6) {
+    nameWidth += secondaryTokens.reduce(function (total, token) { return total + token.text.length; }, 0);
+    secondaryTokens = [];
+  }
+
+  if (nameWidth < 1) {
+    nameWidth = 1;
+  }
+
+  nameText = clipText(entry.name, nameWidth);
+
+  writeStyledTokens(
+    frame,
+    x + 1,
+    y,
+    contentWidth,
+    [
+      { text: prefixText, attr: nameAttr },
+      { text: nameText, attr: nameAttr }
+    ].concat(primaryTokens, secondaryTokens)
+  );
+}
+
 function renderActionTokens(frame: Frame, actions: ActionBarAction[]): void {
   let x = 1;
   let index = 0;
@@ -239,32 +361,39 @@ function renderChannelsModal(frame: Frame, modal: ChannelsModalState): void {
   let row = 0;
 
   drawBorder(frame, modal.title);
-  drawHorizontalRule(frame, frame.height - 1, 2, frame.width - 2);
 
   if (!modal.entries.length) {
     frame.gotoxy(2, Math.max(2, Math.floor(frame.height / 2)));
     frame.putmsg(centerText("No joined channels.", frame.width - 2), DARKGRAY);
-    frame.gotoxy(3, frame.height - 1);
-    frame.putmsg(clipText("Esc close | use /join <channel>", frame.width - 4), LIGHTBLUE);
+    drawCommandFooter(frame, [
+      { text: "Esc", attr: YELLOW },
+      { text: " close | ", attr: LIGHTBLUE },
+      { text: "/join", attr: YELLOW },
+      { text: " start", attr: LIGHTBLUE }
+    ]);
     return;
   }
 
   for (row = 0; row < bodyHeight; row += 1) {
     const entry = modal.entries[topIndex + row];
-    let label = "";
-    let metaText = "";
 
     if (!entry) {
       break;
     }
 
-    metaText = entry.metaText ? entry.metaText : String(entry.userCount);
-    label = (entry.isCurrent ? "* " : "  ") + entry.name + " (" + metaText + ")";
-    drawListRow(frame, 2, 2 + row, frame.width - 2, label, topIndex + row === selectedIndex, entry.isCurrent ? LIGHTCYAN : WHITE);
+    drawChannelLikeRow(frame, 2, 2 + row, frame.width - 2, entry, "Users", topIndex + row === selectedIndex);
   }
 
-  frame.gotoxy(3, frame.height - 1);
-  frame.putmsg(clipText("Enter switch | Esc close | use /join and /part for edits", frame.width - 4), LIGHTBLUE);
+  drawCommandFooter(frame, [
+    { text: "Enter", attr: YELLOW },
+    { text: " switch | ", attr: LIGHTBLUE },
+    { text: "Esc", attr: YELLOW },
+    { text: " close | ", attr: LIGHTBLUE },
+    { text: "/join", attr: YELLOW },
+    { text: " ", attr: LIGHTBLUE },
+    { text: "/part", attr: YELLOW },
+    { text: " manage", attr: LIGHTBLUE }
+  ]);
 }
 
 function renderPrivateThreadsModal(frame: Frame, modal: PrivateThreadsModalState): void {
@@ -276,32 +405,37 @@ function renderPrivateThreadsModal(frame: Frame, modal: PrivateThreadsModalState
   let row = 0;
 
   drawBorder(frame, modal.title);
-  drawHorizontalRule(frame, frame.height - 1, 2, frame.width - 2);
 
   if (!modal.entries.length) {
     frame.gotoxy(2, Math.max(2, Math.floor(frame.height / 2)));
     frame.putmsg(centerText("No private threads yet.", frame.width - 2), DARKGRAY);
-    frame.gotoxy(3, frame.height - 1);
-    frame.putmsg(clipText("Esc close | use /msg <user> <message>", frame.width - 4), LIGHTBLUE);
+    drawCommandFooter(frame, [
+      { text: "Esc", attr: YELLOW },
+      { text: " close | ", attr: LIGHTBLUE },
+      { text: "/msg", attr: YELLOW },
+      { text: " start", attr: LIGHTBLUE }
+    ]);
     return;
   }
 
   for (row = 0; row < bodyHeight; row += 1) {
     const entry = modal.entries[topIndex + row];
-    let label = "";
-    let metaText = "";
 
     if (!entry) {
       break;
     }
 
-    metaText = entry.metaText ? entry.metaText : "pm";
-    label = (entry.isCurrent ? "* " : "  ") + entry.name + " (" + metaText + ")";
-    drawListRow(frame, 2, 2 + row, frame.width - 2, label, topIndex + row === selectedIndex, entry.metaText && entry.metaText.indexOf("new ") === 0 ? YELLOW : LIGHTMAGENTA);
+    drawChannelLikeRow(frame, 2, 2 + row, frame.width - 2, entry, "Msgs", topIndex + row === selectedIndex);
   }
 
-  frame.gotoxy(3, frame.height - 1);
-  frame.putmsg(clipText("Enter switch | Esc close | unread threads are marked", frame.width - 4), LIGHTBLUE);
+  drawCommandFooter(frame, [
+    { text: "Enter", attr: YELLOW },
+    { text: " switch | ", attr: LIGHTBLUE },
+    { text: "Esc", attr: YELLOW },
+    { text: " close | ", attr: LIGHTBLUE },
+    { text: "/msg", attr: YELLOW },
+    { text: " start chats", attr: LIGHTBLUE }
+  ]);
 }
 
 function renderHelpModal(frame: Frame, modal: HelpModalState): void {
