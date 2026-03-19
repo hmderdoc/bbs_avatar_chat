@@ -172,7 +172,7 @@ var avatarChatLoggedIn = user.number > 0;
     font-size: 0.85rem;
 }
 .avatar-chat-web .avatar-chat-bubble {
-    display: inline-block;
+    display: block;
     padding: 0.7rem 0.9rem;
     border-radius: 0.9rem;
     margin-bottom: 0.35rem;
