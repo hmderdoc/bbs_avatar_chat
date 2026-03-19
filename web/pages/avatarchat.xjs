@@ -48,6 +48,48 @@ var avatarChatLoggedIn = user.number > 0;
     justify-content: space-between;
     gap: 0.75rem;
 }
+.avatar-chat-web .avatar-chat-status {
+    display: none;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    border: 1px solid var(--chat-border);
+    border-radius: 0.75rem;
+    padding: 0.75rem 0.9rem;
+    background: #101010;
+    color: var(--chat-fg);
+}
+.avatar-chat-web .avatar-chat-status.is-visible {
+    display: flex;
+}
+.avatar-chat-web .avatar-chat-status.is-info {
+    border-color: #2e8da1;
+    background: #071418;
+}
+.avatar-chat-web .avatar-chat-status.is-warning {
+    border-color: #8f6d1f;
+    background: #171207;
+}
+.avatar-chat-web .avatar-chat-status.is-error {
+    border-color: #9c3b3b;
+    background: #190909;
+}
+.avatar-chat-web .avatar-chat-status-text {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+.avatar-chat-web .avatar-chat-status-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+.avatar-chat-web .avatar-chat-status-button {
+    border: 1px solid var(--chat-border);
+    background: transparent;
+    color: var(--chat-fg);
+    border-radius: 0.5rem;
+    padding: 0.35rem 0.75rem;
+}
 .avatar-chat-web .avatar-chat-title {
     margin: 0;
     font-size: 1.5rem;
@@ -238,6 +280,13 @@ var avatarChatLoggedIn = user.number > 0;
             <button id="avatar-chat-count" class="avatar-chat-count" type="button">0 users</button>
         </div>
 
+        <div id="avatar-chat-status" class="avatar-chat-status" aria-live="polite">
+            <div id="avatar-chat-status-text" class="avatar-chat-status-text"></div>
+            <div class="avatar-chat-status-actions">
+                <button id="avatar-chat-status-retry" class="avatar-chat-status-button" type="button">Retry now</button>
+            </div>
+        </div>
+
         <div id="avatar-chat-users" class="avatar-chat-users">
             <div class="avatar-chat-users-header">
                 <strong>Online Users</strong>
@@ -283,9 +332,24 @@ var avatarChatLoggedIn = user.number > 0;
     var graphicsReady = false;
     var avatarsReady = false;
     var converter = null;
+    var reconnectTimer = 0;
+    var reconcileTimer = 0;
+    var sendRefreshTimer = 0;
+    var reconnectAttemptCount = 0;
+    var realtimeHealthy = false;
+    var usersRefreshTick = 0;
+    var RECONCILE_INTERVAL_MS = 15000;
+    var RECONNECT_DELAY_MS = 4000;
+    var statusState = {
+        type: '',
+        message: ''
+    };
 
     var channelLabel = document.getElementById('avatar-chat-channel-label');
     var countButton = document.getElementById('avatar-chat-count');
+    var statusBar = document.getElementById('avatar-chat-status');
+    var statusText = document.getElementById('avatar-chat-status-text');
+    var statusRetry = document.getElementById('avatar-chat-status-retry');
     var usersPanel = document.getElementById('avatar-chat-users');
     var usersList = document.getElementById('avatar-chat-users-list');
     var usersClose = document.getElementById('avatar-chat-users-close');
@@ -359,8 +423,105 @@ var avatarChatLoggedIn = user.number > 0;
 
     function fetchJSON(url, options) {
         return fetch(url, options || {}).then(function (response) {
+            if (!response.ok) {
+                throw new Error('HTTP ' + String(response.status));
+            }
             return response.json();
         });
+    }
+
+    function setStatus(type, message, showRetry) {
+        if (!statusBar || !statusText) {
+            return;
+        }
+
+        statusState.type = type || '';
+        statusState.message = message || '';
+
+        statusBar.classList.remove('is-info', 'is-warning', 'is-error', 'is-visible');
+        if (!message) {
+            statusText.textContent = '';
+            if (statusRetry) {
+                statusRetry.style.display = 'none';
+            }
+            return;
+        }
+
+        statusBar.classList.add('is-visible');
+        if (type === 'warning') {
+            statusBar.classList.add('is-warning');
+        } else if (type === 'error') {
+            statusBar.classList.add('is-error');
+        } else {
+            statusBar.classList.add('is-info');
+        }
+
+        statusText.textContent = message;
+        if (statusRetry) {
+            statusRetry.style.display = showRetry ? '' : 'none';
+        }
+    }
+
+    function clearStatusIfMatch(type) {
+        if (!statusState.message) {
+            return;
+        }
+        if (!type || statusState.type === type) {
+            setStatus('', '', false);
+        }
+    }
+
+    function explainServiceError() {
+        return 'Avatar Chat cannot reach the JSON service right now. Check avatar_chat.ini host/port and make sure the JSON service is running.';
+    }
+
+    function explainRealtimeError() {
+        if (reconnectAttemptCount > 2) {
+            return 'Realtime updates are still unavailable. Retrying in the background. If this persists, verify webv4/lib/events/avatarchat.js is installed and that avatar_chat.ini points to a reachable JSON service.';
+        }
+        return 'Realtime updates were interrupted. Retrying automatically. Recent messages will continue to refresh in the background.';
+    }
+
+    function closeEventSource() {
+        if (!eventSource) {
+            return;
+        }
+        try { eventSource.close(); } catch (_closeError) {}
+        eventSource = null;
+    }
+
+    function scheduleReconnect() {
+        if (reconnectTimer) {
+            return;
+        }
+
+        reconnectTimer = window.setTimeout(function () {
+            reconnectTimer = 0;
+            connectEvents(true);
+        }, RECONNECT_DELAY_MS);
+    }
+
+    function reconcileState(forceUsers) {
+        var work = [loadHistory(true)];
+        usersRefreshTick += 1;
+
+        if (forceUsers || usersPanel.classList.contains('is-open') || usersRefreshTick >= 2) {
+            usersRefreshTick = 0;
+            work.push(loadUsers(true));
+        }
+
+        return Promise.all(work).catch(function () {
+            return false;
+        });
+    }
+
+    function startReconcileLoop() {
+        if (reconcileTimer) {
+            return;
+        }
+        reconcileTimer = window.setInterval(function () {
+            reconcileState(false);
+        }, RECONCILE_INTERVAL_MS);
     }
 
     function scrollToBottom() {
@@ -533,16 +694,38 @@ var avatarChatLoggedIn = user.number > 0;
         renderUsers();
     }
 
-    function loadHistory() {
+    function loadHistory(silent) {
         return fetchJSON(apiBase + '?action=history&channel=' + encodeURIComponent(channel)).then(function (response) {
+            if (response && response.error) {
+                throw new Error(String(response.error));
+            }
             messages = response && response.messages ? response.messages : [];
             renderMessages();
+            if (!realtimeHealthy && reconnectAttemptCount > 0 && !silent) {
+                setStatus('warning', 'Realtime updates are not fully healthy, but chat history was refreshed successfully.', true);
+            }
+            return true;
+        }).catch(function (_error) {
+            setStatus('error', explainServiceError(), true);
+            return false;
         });
     }
 
-    function loadUsers() {
+    function loadUsers(silent) {
         return fetchJSON(apiBase + '?action=who&channel=' + encodeURIComponent(channel)).then(function (response) {
+            if (response && response.error) {
+                throw new Error(String(response.error));
+            }
             setUsers(response && response.users ? response.users : []);
+            if (!realtimeHealthy && reconnectAttemptCount > 0 && !silent) {
+                setStatus('warning', 'Realtime updates are not fully healthy, but the online user list was refreshed.', true);
+            }
+            return true;
+        }).catch(function (_error) {
+            if (!silent) {
+                setStatus('error', explainServiceError(), true);
+            }
+            return false;
         });
     }
 
@@ -559,12 +742,22 @@ var avatarChatLoggedIn = user.number > 0;
         });
     }
 
-    function connectEvents() {
+    function connectEvents(isReconnect) {
         if (!window.EventSource) {
+            setStatus('warning', 'This browser does not support realtime updates. Chat will refresh automatically every few seconds.', false);
             return;
         }
 
+        closeEventSource();
         eventSource = new EventSource(eventUrl);
+        if (isReconnect) {
+            setStatus('warning', 'Reconnecting realtime updates...', true);
+        }
+        eventSource.onopen = function () {
+            realtimeHealthy = true;
+            reconnectAttemptCount = 0;
+            clearStatusIfMatch('warning');
+        };
         eventSource.addEventListener('avatarchat', function (event) {
             var payload;
 
@@ -591,6 +784,13 @@ var avatarChatLoggedIn = user.number > 0;
                 loadUsers();
             }
         });
+        eventSource.onerror = function () {
+            realtimeHealthy = false;
+            reconnectAttemptCount += 1;
+            setStatus('warning', explainRealtimeError(), true);
+            closeEventSource();
+            scheduleReconnect();
+        };
     }
 
     if (countButton) {
@@ -608,6 +808,15 @@ var avatarChatLoggedIn = user.number > 0;
         });
     }
 
+    if (statusRetry) {
+        statusRetry.addEventListener('click', function () {
+            reconnectAttemptCount = 0;
+            closeEventSource();
+            reconcileState(true);
+            connectEvents(true);
+        });
+    }
+
     if (form) {
         form.addEventListener('submit', function (event) {
             var text = input.value.replace(/^\s+|\s+$/g, '');
@@ -619,18 +828,47 @@ var avatarChatLoggedIn = user.number > 0;
 
             sendMessage(text).then(function (response) {
                 if (response && response.error) {
-                    window.alert(response.error);
+                    setStatus('error', String(response.error), true);
                     return;
                 }
                 input.value = '';
+                if (sendRefreshTimer) {
+                    window.clearTimeout(sendRefreshTimer);
+                }
+                sendRefreshTimer = window.setTimeout(function () {
+                    sendRefreshTimer = 0;
+                    loadHistory(true);
+                }, 1000);
+                if (!realtimeHealthy) {
+                    reconcileState(true);
+                }
+            }).catch(function () {
+                setStatus('error', explainServiceError(), true);
             });
         });
     }
 
     ensureDependencies(function () {
-        loadHistory();
-        loadUsers();
+        loadHistory(false);
+        loadUsers(false);
         connectEvents();
+        startReconcileLoop();
+    });
+
+    window.addEventListener('beforeunload', function () {
+        if (reconnectTimer) {
+            window.clearTimeout(reconnectTimer);
+            reconnectTimer = 0;
+        }
+        if (reconcileTimer) {
+            window.clearInterval(reconcileTimer);
+            reconcileTimer = 0;
+        }
+        if (sendRefreshTimer) {
+            window.clearTimeout(sendRefreshTimer);
+            sendRefreshTimer = 0;
+        }
+        closeEventSource();
     });
 })();
 </script>
