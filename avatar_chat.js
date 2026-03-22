@@ -1,5 +1,5 @@
 // Avatar Chat - Auto-generated, do not edit directly.
-// Built: 2026-03-22T22:00:00.181Z
+// Built: 2026-03-22T22:40:53.955Z
 load("sbbsdefs.js");
 load("key_defs.js");
 load("frame.js");
@@ -91,20 +91,75 @@ load("json-chat.js");
     }
     return lines;
   }
-  function formatClockTime(timestamp) {
-    var date = new Date(timestamp);
-    var hours = date.getHours();
-    var minutes = date.getMinutes();
-    var isPm = hours >= 12;
-    var hourText = "";
-    var minuteText = "";
-    hours = hours % 12;
-    if (hours === 0) {
-      hours = 12;
+  function formatRelativeTime(currentMs, previousMs) {
+    if (!currentMs || isNaN(currentMs))
+      return "";
+    var now = /* @__PURE__ */ new Date();
+    var cur = new Date(currentMs);
+    var todayY = now.getFullYear();
+    var todayM = now.getMonth();
+    var todayD = now.getDate();
+    var curY = cur.getFullYear();
+    var curM = cur.getMonth();
+    var curD = cur.getDate();
+    var curH = cur.getHours();
+    var curMin = cur.getMinutes();
+    var curIsToday = curY === todayY && curM === todayM && curD === todayD;
+    var pad2 = function(n) {
+      return n < 10 ? "0" + String(n) : String(n);
+    };
+    var h12 = function(h) {
+      return h % 12 === 0 ? 12 : h % 12;
+    };
+    var amPm = function(h) {
+      return h < 12 ? "am" : "pm";
+    };
+    var curTimeStr = String(h12(curH)) + ":" + pad2(curMin) + " " + amPm(curH);
+    var curDateStr = pad2(curM + 1) + "/" + pad2(curD) + "/" + String(curY).substr(2);
+    if (!previousMs) {
+      return curIsToday ? "Today " + curTimeStr : curDateStr + " " + curTimeStr;
     }
-    hourText = String(hours);
-    minuteText = minutes < 10 ? "0" + String(minutes) : String(minutes);
-    return hourText + ":" + minuteText + (isPm ? " pm" : " am");
+    var last = new Date(previousMs);
+    var lastY = last.getFullYear();
+    var lastM = last.getMonth();
+    var lastD = last.getDate();
+    if (curY === lastY && curM === lastM && curD === lastD) {
+      if (curIsToday) {
+        var diffMs = now.getTime() - cur.getTime();
+        var totalMin = Math.floor(diffMs / 6e4);
+        var diffHr = Math.floor(totalMin / 60);
+        var diffMin = totalMin % 60;
+        if (diffHr > 0) {
+          var s = String(diffHr) + (diffHr === 1 ? " hour" : " hours");
+          if (diffMin > 0)
+            s += " " + String(diffMin) + (diffMin === 1 ? " minute" : " minutes");
+          return s + " ago";
+        }
+        if (diffMin > 0) {
+          return String(diffMin) + (diffMin === 1 ? " minute" : " minutes") + " ago";
+        }
+        return "just now";
+      }
+      return curTimeStr;
+    }
+    if (curIsToday) {
+      return "Today " + curTimeStr;
+    }
+    return curDateStr + " " + curTimeStr;
+  }
+  function compactTimestamp(text) {
+    if (!text)
+      return "";
+    var s = text;
+    s = s.replace(/hours?/g, "h");
+    s = s.replace(/minutes?/g, "m");
+    s = s.replace(/seconds?/g, "s");
+    s = s.replace(/Today\s*/i, "");
+    s = s.replace(/Yesterday\s*/i, "yday ");
+    s = s.replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "");
+    if (s === "just now")
+      s = "now";
+    return s;
   }
 
   // build/domain/chat-model.js
@@ -964,14 +1019,30 @@ load("json-chat.js");
         });
         continue;
       }
-      blocks.push(buildBubbleLayout(group, maxBubbleWidth, avatarSize.height, options));
+      var prevGroupTime = 0;
+      if (index > 0) {
+        var prevGroup = groups[index - 1];
+        if (prevGroup && prevGroup.messages.length) {
+          var prevLast = prevGroup.messages[prevGroup.messages.length - 1];
+          if (prevLast)
+            prevGroupTime = prevLast.time;
+        }
+      }
+      blocks.push(buildBubbleLayout(group, maxBubbleWidth, avatarSize.height, options, prevGroupTime));
     }
     return blocks;
   }
-  function buildBubbleLayout(group, maxBubbleWidth, avatarHeight, options) {
+  function buildBubbleLayout(group, maxBubbleWidth, avatarHeight, options, prevGroupTime) {
     var rows = [];
     var lastMessage = group.messages.length ? group.messages[group.messages.length - 1] : null;
-    var timestamp = lastMessage ? formatClockTime(lastMessage.time) : "";
+    var timestamp = "";
+    if (lastMessage) {
+      timestamp = formatRelativeTime(lastMessage.time, prevGroupTime || 0);
+      var headerSpace = maxBubbleWidth - (group.speakerName || "").length - 2;
+      if (headerSpace < timestamp.length) {
+        timestamp = compactTimestamp(timestamp);
+      }
+    }
     var index = 0;
     var messageIndex = 0;
     var width = 0;
@@ -1060,8 +1131,10 @@ load("json-chat.js");
   function renderNotice(frame, block, startRow) {
     var index = 0;
     for (index = 0; index < block.lines.length; index += 1) {
-      frame.gotoxy(1, startRow + index);
-      frame.putmsg(centerText(block.lines[index] || "", frame.width), DARKGRAY);
+      var line = block.lines[index] || "";
+      var leftOffset = Math.max(0, Math.floor((frame.width - line.length) / 2));
+      frame.gotoxy(1 + leftOffset, startRow + index);
+      frame.putmsg(line, DARKGRAY);
     }
     return startRow + block.lines.length;
   }
@@ -1510,6 +1583,9 @@ load("json-chat.js");
             }
             if (!message || !this.rememberPublicChannelMessage(channel.name, message)) {
               continue;
+            }
+            if (!message.nick) {
+              this.enrichJoinLeaveNotice(message, channel);
             }
             if (markUnread && channel.name.toUpperCase() !== this.currentChannel.toUpperCase() && message.nick && message.nick.name && message.nick.name.toUpperCase() !== user.alias.toUpperCase()) {
               this.publicChannelUnreadCounts[unreadKey] += 1;
@@ -2463,6 +2539,45 @@ load("json-chat.js");
           nick: nick,
           isSelf: name.toUpperCase() === user.alias.toUpperCase()
         };
+      };
+      AvatarChatApp2.prototype.enrichJoinLeaveNotice = function(message, channel) {
+        if (!message || message.nick || !message.str)
+          return;
+        var text = message.str;
+        var hereMatch = /^(.+) is here\.$/.exec(text);
+        if (hereMatch) {
+          var userName = hereMatch[1] || "";
+          var bbsName = this.lookupUserBbs(userName, channel);
+          if (bbsName && bbsName.toUpperCase() !== system.name.toUpperCase()) {
+            message.str = userName + " is here from " + bbsName;
+          } else {
+            message.str = userName + " is here.";
+          }
+          return;
+        }
+        var leftMatch = /^(.+) has left\.$/.exec(text);
+        if (leftMatch) {
+          var userName = leftMatch[1] || "";
+          var bbsName = this.lookupUserBbs(userName, channel);
+          if (bbsName && bbsName.toUpperCase() !== system.name.toUpperCase()) {
+            message.str = userName + " from " + bbsName + " left.";
+          } else {
+            message.str = userName + " has left.";
+          }
+          return;
+        }
+      };
+      AvatarChatApp2.prototype.lookupUserBbs = function(userName, channel) {
+        var upper = userName.toUpperCase();
+        if (channel && channel.users) {
+          for (var i = 0; i < channel.users.length; i += 1) {
+            var entry = this.extractRosterEntry(channel.users[i]);
+            if (entry && entry.name.toUpperCase() === upper) {
+              return entry.bbs;
+            }
+          }
+        }
+        return "";
       };
       AvatarChatApp2.prototype.buildChannelEntries = function() {
         var entries = [];

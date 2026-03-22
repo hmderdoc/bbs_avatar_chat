@@ -543,6 +543,11 @@ export class AvatarChatApp {
           continue;
         }
 
+        // Enrich join/leave notices with BBS name
+        if (!message.nick) {
+          this.enrichJoinLeaveNotice(message, channel);
+        }
+
         if (
           markUnread &&
           channel.name.toUpperCase() !== this.currentChannel.toUpperCase() &&
@@ -1712,6 +1717,62 @@ export class AvatarChatApp {
       nick: nick,
       isSelf: name.toUpperCase() === user.alias.toUpperCase()
     };
+  }
+
+  /**
+   * Enrich a join/leave system notice with the user's BBS name.
+   * "PhilTaylor is here." -> "PhilTaylor is here from futureland.today"
+   * "Guest has left."     -> "Guest from otherBBS left."
+   * Looks up the BBS name from the channel roster.
+   */
+  private enrichJoinLeaveNotice(message: ChatMessage, channel: ChatChannel): void {
+    if (!message || message.nick || !message.str) return;
+    const text = message.str;
+
+    // Match "Username is here." pattern
+    const hereMatch = /^(.+) is here\.$/.exec(text);
+    if (hereMatch) {
+      const userName = hereMatch[1] || "";
+      const bbsName = this.lookupUserBbs(userName, channel);
+      if (bbsName && bbsName.toUpperCase() !== system.name.toUpperCase()) {
+        message.str = userName + " is here from " + bbsName;
+      } else {
+        message.str = userName + " is here.";
+      }
+      return;
+    }
+
+    // Match "Username has left." pattern
+    const leftMatch = /^(.+) has left\.$/.exec(text);
+    if (leftMatch) {
+      const userName = leftMatch[1] || "";
+      const bbsName = this.lookupUserBbs(userName, channel);
+      if (bbsName && bbsName.toUpperCase() !== system.name.toUpperCase()) {
+        message.str = userName + " from " + bbsName + " left.";
+      } else {
+        message.str = userName + " has left.";
+      }
+      return;
+    }
+  }
+
+  /**
+   * Look up BBS name for a username from channel roster or embedded avatars cache.
+   */
+  private lookupUserBbs(userName: string, channel: ChatChannel): string {
+    const upper = userName.toUpperCase();
+
+    // Try channel roster first
+    if (channel && channel.users) {
+      for (let i = 0; i < channel.users.length; i += 1) {
+        const entry = this.extractRosterEntry(channel.users[i]);
+        if (entry && entry.name.toUpperCase() === upper) {
+          return entry.bbs;
+        }
+      }
+    }
+
+    return "";
   }
 
   private buildChannelEntries(): ChannelListEntry[] {
