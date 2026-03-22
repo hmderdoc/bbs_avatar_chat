@@ -117,6 +117,7 @@ export class AvatarChatApp {
   private idleTickInterval: number;
   private lastAnimTickAt: number;
   private embeddedAvatars: { [nameUpper: string]: string };
+  private userBbsCache: { [nameUpper: string]: string };
 
   public constructor(config: AvatarChatConfig) {
     this.config = config;
@@ -170,6 +171,7 @@ export class AvatarChatApp {
     this.idleTickInterval = 0;
     this.lastAnimTickAt = 0;
     this.embeddedAvatars = {};
+    this.userBbsCache = {};
 
     try {
       this.avatarLib = load({}, "avatar_lib.js") as AvatarLibrary;
@@ -1711,6 +1713,10 @@ export class AvatarChatApp {
       return null;
     }
 
+    // Cache BBS name for departed-user lookup
+    if (bbs && bbs.length) {
+      this.userBbsCache[name.toUpperCase()] = bbs;
+    }
     return {
       name: name,
       bbs: bbs || "Unknown BBS",
@@ -1734,10 +1740,8 @@ export class AvatarChatApp {
     if (hereMatch) {
       const userName = hereMatch[1] || "";
       const bbsName = this.lookupUserBbs(userName, channel);
-      if (bbsName && bbsName.toUpperCase() !== system.name.toUpperCase()) {
+      if (bbsName) {
         message.str = userName + " is here from " + bbsName;
-      } else {
-        message.str = userName + " is here.";
       }
       return;
     }
@@ -1747,10 +1751,8 @@ export class AvatarChatApp {
     if (leftMatch) {
       const userName = leftMatch[1] || "";
       const bbsName = this.lookupUserBbs(userName, channel);
-      if (bbsName && bbsName.toUpperCase() !== system.name.toUpperCase()) {
+      if (bbsName) {
         message.str = userName + " from " + bbsName + " left.";
-      } else {
-        message.str = userName + " has left.";
       }
       return;
     }
@@ -1772,7 +1774,8 @@ export class AvatarChatApp {
       }
     }
 
-    return "";
+    // Fall back to cached BBS name (for departed users)
+    return this.userBbsCache[upper] || "";
   }
 
   private buildChannelEntries(): ChannelListEntry[] {

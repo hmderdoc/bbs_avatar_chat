@@ -1,5 +1,5 @@
 // Avatar Chat - Auto-generated, do not edit directly.
-// Built: 2026-03-22T22:40:53.955Z
+// Built: 2026-03-22T23:08:08.707Z
 load("sbbsdefs.js");
 load("key_defs.js");
 load("frame.js");
@@ -1291,6 +1291,7 @@ load("json-chat.js");
         this.idleTickInterval = 0;
         this.lastAnimTickAt = 0;
         this.embeddedAvatars = {};
+        this.userBbsCache = {};
         try {
           this.avatarLib = load({}, "avatar_lib.js");
         } catch (error) {
@@ -2533,6 +2534,9 @@ load("json-chat.js");
         if (!name.length) {
           return null;
         }
+        if (bbs2 && bbs2.length) {
+          this.userBbsCache[name.toUpperCase()] = bbs2;
+        }
         return {
           name: name,
           bbs: bbs2 || "Unknown BBS",
@@ -2548,10 +2552,8 @@ load("json-chat.js");
         if (hereMatch) {
           var userName = hereMatch[1] || "";
           var bbsName = this.lookupUserBbs(userName, channel);
-          if (bbsName && bbsName.toUpperCase() !== system.name.toUpperCase()) {
+          if (bbsName) {
             message.str = userName + " is here from " + bbsName;
-          } else {
-            message.str = userName + " is here.";
           }
           return;
         }
@@ -2559,10 +2561,8 @@ load("json-chat.js");
         if (leftMatch) {
           var userName = leftMatch[1] || "";
           var bbsName = this.lookupUserBbs(userName, channel);
-          if (bbsName && bbsName.toUpperCase() !== system.name.toUpperCase()) {
+          if (bbsName) {
             message.str = userName + " from " + bbsName + " left.";
-          } else {
-            message.str = userName + " has left.";
           }
           return;
         }
@@ -2577,7 +2577,7 @@ load("json-chat.js");
             }
           }
         }
-        return "";
+        return this.userBbsCache[upper] || "";
       };
       AvatarChatApp2.prototype.buildChannelEntries = function() {
         var entries = [];
