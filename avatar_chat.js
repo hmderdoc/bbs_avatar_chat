@@ -1,5 +1,5 @@
 // Avatar Chat - Auto-generated, do not edit directly.
-// Built: 2026-03-19T00:02:03.216Z
+// Built: 2026-03-22T20:38:18.857Z
 load("sbbsdefs.js");
 load("key_defs.js");
 load("frame.js");
@@ -1180,6 +1180,8 @@ load("json-chat.js");
           header: null,
           actions: null,
           transcript: null,
+          animBg: null,
+          animFg: null,
           status: null,
           input: null,
           overlay: null,
@@ -1209,6 +1211,12 @@ load("json-chat.js");
         this.publicChannelMessageKeys = {};
         this.publicChannelUnreadCounts = {};
         this.lastPrivateHistorySyncAt = 0;
+        this.lastKeyTimestamp = Date.now();
+        this.idleAnimActive = false;
+        this.bgAnimMgr = null;
+        this.fgAnimMgr = null;
+        this.idleTickInterval = 0;
+        this.lastAnimTickAt = 0;
         try {
           this.avatarLib = load({}, "avatar_lib.js");
         } catch (error) {
@@ -1225,6 +1233,7 @@ load("json-chat.js");
             this.cycleChat();
             this.reconnectIfDue();
             this.handlePendingInput();
+            this.tickIdleAnimations();
             this.render();
           }
         } finally {
@@ -1567,6 +1576,10 @@ load("json-chat.js");
         var key = this.readInputKey();
         if (!key) {
           return;
+        }
+        this.lastKeyTimestamp = Date.now();
+        if (this.idleAnimActive) {
+          this.stopIdleAnimations();
         }
         if (this.modalState && this.handleModalInput(key)) {
           return;
@@ -2676,8 +2689,16 @@ load("json-chat.js");
         this.frames.header.open();
         this.frames.actions = new Frame(1, 2, width, 1, BG_BLUE | WHITE, this.frames.root);
         this.frames.actions.open();
+        this.frames.animBg = new Frame(1, 3, width, transcriptHeight, BG_BLACK | LIGHTGRAY, this.frames.root);
+        this.frames.animBg.transparent = true;
+        this.frames.animBg.open();
         this.frames.transcript = new Frame(1, 3, width, transcriptHeight, BG_BLACK | LIGHTGRAY, this.frames.root);
+        this.frames.transcript.transparent = true;
         this.frames.transcript.open();
+        this.frames.animFg = new Frame(1, 3, width, transcriptHeight, BG_BLACK | LIGHTGRAY, this.frames.root);
+        this.frames.animFg.transparent = true;
+        this.frames.animFg.open();
+        this.frames.animFg.top();
         this.frames.status = new Frame(1, transcriptHeight + 3, width, 1, BG_MAGENTA | WHITE, this.frames.root);
         this.frames.status.open();
         this.frames.input = new Frame(1, transcriptHeight + 4, width, 1, BG_BLACK | WHITE, this.frames.root);
@@ -2749,12 +2770,23 @@ load("json-chat.js");
         this.frames.overlay = null;
       };
       AvatarChatApp2.prototype.destroyFrames = function() {
+        if (this.idleAnimActive) {
+          this.stopIdleAnimations();
+        }
+        this.bgAnimMgr = null;
+        this.fgAnimMgr = null;
         this.destroyModalFrames();
         if (this.frames.input) {
           this.frames.input.close();
         }
         if (this.frames.status) {
           this.frames.status.close();
+        }
+        if (this.frames.animFg) {
+          this.frames.animFg.close();
+        }
+        if (this.frames.animBg) {
+          this.frames.animBg.close();
         }
         if (this.frames.transcript) {
           this.frames.transcript.close();
@@ -2772,10 +2804,215 @@ load("json-chat.js");
         this.frames.header = null;
         this.frames.actions = null;
         this.frames.transcript = null;
+        this.frames.animBg = null;
+        this.frames.animFg = null;
         this.frames.status = null;
         this.frames.input = null;
         this.frames.width = 0;
         this.frames.height = 0;
+      };
+      AvatarChatApp2.prototype.buildAnimOpts = function() {
+        var cfg = this.config.idleAnimations;
+        return {
+          switch_interval: cfg.switchInterval,
+          fps: cfg.fps,
+          random: cfg.random,
+          sequence: cfg.sequence,
+          clear_on_switch: cfg.clearOnSwitch,
+          debug: false,
+          figlet_messages: cfg.figletMessages,
+          figlet_refresh: cfg.figletRefresh,
+          figlet_fonts: cfg.figletFonts || void 0,
+          figlet_colors: cfg.figletColors,
+          figlet_move: cfg.figletMove,
+          use_avatar_frames: cfg.useAvatarFrames,
+          avatar_lib: this.avatarLib || void 0,
+          star_count: cfg.starCount,
+          aurora_speed: cfg.auroraSpeed,
+          aurora_wave: cfg.auroraWave,
+          matrix_sparse: cfg.matrixSparse,
+          plasma_speed: cfg.plasmaSpeed,
+          plasma_scale: cfg.plasmaScale,
+          tunnel_speed: cfg.tunnelSpeed,
+          tunnel_scale: cfg.tunnelScale,
+          lissajous_speed: cfg.lissajousSpeed,
+          fire_decay: cfg.fireDecay,
+          ripple_count: cfg.rippleCount
+        };
+      };
+      AvatarChatApp2.prototype.initIdleAnimManagers = function() {
+        var cfg = this.config.idleAnimations;
+        if (!cfg.enabled)
+          return;
+        var CA = js.global.CanvasAnimations;
+        var AF = js.global.AvatarsFloat;
+        if (!CA) {
+          log("Avatar Chat: CanvasAnimations not loaded, idle animations disabled");
+          return;
+        }
+        var disableSet = {};
+        for (var i = 0; i < cfg.disable.length; i++) {
+          var disabledName = cfg.disable[i];
+          if (disabledName) {
+            disableSet[disabledName] = true;
+          }
+        }
+        var opts = this.buildAnimOpts();
+        var bgSeq = [];
+        var fgSeq = [];
+        if (cfg.sequence.length) {
+          for (var i = 0; i < cfg.sequence.length; i++) {
+            var name = cfg.sequence[i];
+            if (!name) {
+              continue;
+            }
+            if (AvatarChatApp2.FOREGROUND_ANIMATIONS.indexOf(name) >= 0) {
+              fgSeq.push(name);
+            } else {
+              bgSeq.push(name);
+            }
+          }
+        }
+        if (this.frames.animBg) {
+          var bgOpts = {};
+          for (var k in opts) {
+            if (Object.prototype.hasOwnProperty.call(opts, k))
+              bgOpts[k] = opts[k];
+          }
+          bgOpts.sequence = bgSeq.length ? bgSeq : void 0;
+          this.bgAnimMgr = new CA.AnimationManager(this.frames.animBg, bgOpts);
+          for (var name in AvatarChatApp2.BG_ANIMATION_MAP) {
+            var ctorKey = AvatarChatApp2.BG_ANIMATION_MAP[name];
+            if (!ctorKey) {
+              continue;
+            }
+            if (!disableSet[name] && CA[ctorKey]) {
+              this.bgAnimMgr.add(name, CA[ctorKey]);
+            }
+          }
+        }
+        if (this.frames.animFg) {
+          var fgOpts = {};
+          for (var k in opts) {
+            if (Object.prototype.hasOwnProperty.call(opts, k))
+              fgOpts[k] = opts[k];
+          }
+          fgOpts.sequence = fgSeq.length ? fgSeq : void 0;
+          this.fgAnimMgr = new CA.AnimationManager(this.frames.animFg, fgOpts);
+          for (var name in AvatarChatApp2.FG_ANIMATION_MAP) {
+            if (disableSet[name])
+              continue;
+            var ctorKey = AvatarChatApp2.FG_ANIMATION_MAP[name];
+            if (!ctorKey) {
+              continue;
+            }
+            if (name === "avatars_float" && AF && AF.AvatarsFloat) {
+              this.fgAnimMgr.add(name, AF.AvatarsFloat);
+            } else if (CA[ctorKey]) {
+              this.fgAnimMgr.add(name, CA[ctorKey]);
+            }
+          }
+        }
+        this.idleTickInterval = Math.max(50, Math.floor(1e3 / Math.max(1, cfg.fps)));
+      };
+      AvatarChatApp2.prototype.startIdleAnimations = function() {
+        if (this.idleAnimActive)
+          return;
+        if (!this.bgAnimMgr && !this.fgAnimMgr) {
+          this.initIdleAnimManagers();
+        }
+        if (!this.bgAnimMgr && !this.fgAnimMgr)
+          return;
+        this.idleAnimActive = true;
+        this.lastAnimTickAt = Date.now();
+        if (this.bgAnimMgr) {
+          try {
+            this.bgAnimMgr.start();
+          } catch (e) {
+            log("Avatar Chat: bg animation start error: " + String(e));
+          }
+        }
+        if (this.fgAnimMgr) {
+          try {
+            this.fgAnimMgr.start();
+          } catch (e) {
+            log("Avatar Chat: fg animation start error: " + String(e));
+          }
+        }
+      };
+      AvatarChatApp2.prototype.stopIdleAnimations = function() {
+        if (!this.idleAnimActive)
+          return;
+        this.idleAnimActive = false;
+        if (this.bgAnimMgr) {
+          try {
+            this.bgAnimMgr.dispose();
+          } catch (e) {
+          }
+        }
+        if (this.fgAnimMgr) {
+          try {
+            this.fgAnimMgr.dispose();
+          } catch (e) {
+          }
+        }
+        if (this.frames.animBg) {
+          try {
+            this.frames.animBg.clear();
+            this.frames.animBg.invalidate();
+          } catch (e) {
+          }
+        }
+        if (this.frames.animFg) {
+          try {
+            this.frames.animFg.clear();
+            this.frames.animFg.invalidate();
+          } catch (e) {
+          }
+        }
+        if (this.frames.transcript) {
+          try {
+            this.frames.transcript.invalidate();
+          } catch (e) {
+          }
+        }
+        this.resetRenderSignatures();
+      };
+      AvatarChatApp2.prototype.tickIdleAnimations = function() {
+        var cfg = this.config.idleAnimations;
+        if (!cfg.enabled)
+          return;
+        var now = Date.now();
+        var elapsed = now - this.lastKeyTimestamp;
+        if (!this.idleAnimActive) {
+          if (elapsed >= cfg.idleTimeoutSeconds * 1e3) {
+            this.startIdleAnimations();
+          }
+          return;
+        }
+        if (now - this.lastAnimTickAt < this.idleTickInterval) {
+          return;
+        }
+        this.lastAnimTickAt = now;
+        var switchNow = now - this.lastKeyTimestamp > 0 && this.bgAnimMgr && this.bgAnimMgr.lastSwitch && time() - this.bgAnimMgr.lastSwitch >= cfg.switchInterval;
+        if (this.bgAnimMgr) {
+          try {
+            if (switchNow)
+              this.bgAnimMgr.start();
+            this.bgAnimMgr.tick();
+          } catch (e) {
+            log("Avatar Chat: bg animation tick error: " + String(e));
+          }
+        }
+        if (this.fgAnimMgr) {
+          try {
+            if (switchNow)
+              this.fgAnimMgr.start();
+            this.fgAnimMgr.tick();
+          } catch (e) {
+            log("Avatar Chat: fg animation tick error: " + String(e));
+          }
+        }
       };
       AvatarChatApp2.prototype.render = function() {
         this.ensureFrames();
@@ -3074,11 +3311,60 @@ load("json-chat.js");
         }
         return parts.join("|");
       };
+      AvatarChatApp2.FOREGROUND_ANIMATIONS = ["figlet_message", "avatars_float"];
+      AvatarChatApp2.BG_ANIMATION_MAP = {
+        tv_static: "TvStatic",
+        matrix_rain: "MatrixRain",
+        life: "Life",
+        starfield: "Starfield",
+        fireflies: "Fireflies",
+        sine_wave: "SineWave",
+        comet_trails: "CometTrails",
+        plasma: "Plasma",
+        fireworks: "Fireworks",
+        aurora: "Aurora",
+        fire_smoke: "FireSmoke",
+        ocean_ripple: "OceanRipple",
+        lissajous: "LissajousTrails",
+        lightning: "LightningStorm",
+        tunnel: "RecursiveTunnel"
+      };
+      AvatarChatApp2.FG_ANIMATION_MAP = {
+        figlet_message: "FigletMessage",
+        avatars_float: "AvatarsFloat"
+      };
       return AvatarChatApp2;
     }()
   );
 
   // build/io/config.js
+  var DEFAULT_IDLE = {
+    enabled: true,
+    idleTimeoutSeconds: 180,
+    switchInterval: 60,
+    fps: 4,
+    random: true,
+    sequence: [],
+    disable: [],
+    clearOnSwitch: true,
+    figletMessages: "Avatar Chat",
+    figletRefresh: 180,
+    figletFonts: "",
+    figletColors: true,
+    figletMove: true,
+    useAvatarFrames: true,
+    starCount: 180,
+    auroraSpeed: 0.12,
+    auroraWave: 0.35,
+    matrixSparse: 4,
+    plasmaSpeed: 0.18,
+    plasmaScale: 0.12,
+    tunnelSpeed: 0.22,
+    tunnelScale: 0.17,
+    lissajousSpeed: 0.12,
+    fireDecay: 1,
+    rippleCount: 4
+  };
   var DEFAULT_CONFIG = {
     host: "127.0.0.1",
     port: 10088,
@@ -3086,7 +3372,8 @@ load("json-chat.js");
     maxHistory: 200,
     pollDelayMs: 25,
     reconnectDelayMs: 3e3,
-    inputMaxLength: 500
+    inputMaxLength: 500,
+    idleAnimations: DEFAULT_IDLE
   };
   function readString(file, key, defaultValue) {
     var value = file.iniGetValue(null, key, defaultValue);
@@ -3103,6 +3390,66 @@ load("json-chat.js");
     }
     return parsed;
   }
+  function readFloat(file, key, defaultValue) {
+    var value = file.iniGetValue(null, key, defaultValue);
+    var parsed = parseFloat(String(value));
+    if (isNaN(parsed)) {
+      return defaultValue;
+    }
+    return parsed;
+  }
+  function readBool(file, key, defaultValue) {
+    var value = file.iniGetValue(null, key, defaultValue);
+    if (value === void 0 || value === null) {
+      return defaultValue;
+    }
+    var s = String(value).toLowerCase().trim();
+    if (s === "true" || s === "1" || s === "yes") {
+      return true;
+    }
+    if (s === "false" || s === "0" || s === "no") {
+      return false;
+    }
+    return defaultValue;
+  }
+  function readList(file, key, defaultValue) {
+    var value = file.iniGetValue(null, key, "");
+    if (value === void 0 || value === null || String(value).trim() === "") {
+      return defaultValue;
+    }
+    return String(value).split(",").map(function(s) {
+      return s.trim();
+    }).filter(Boolean);
+  }
+  function loadIdleAnimConfig(file) {
+    return {
+      enabled: readBool(file, "idle_enabled", DEFAULT_IDLE.enabled),
+      idleTimeoutSeconds: readNumber(file, "idle_timeout_seconds", DEFAULT_IDLE.idleTimeoutSeconds),
+      switchInterval: readNumber(file, "idle_switch_interval", DEFAULT_IDLE.switchInterval),
+      fps: readNumber(file, "idle_fps", DEFAULT_IDLE.fps),
+      random: readBool(file, "idle_random", DEFAULT_IDLE.random),
+      sequence: readList(file, "idle_sequence", DEFAULT_IDLE.sequence),
+      disable: readList(file, "idle_disable", DEFAULT_IDLE.disable),
+      clearOnSwitch: readBool(file, "idle_clear_on_switch", DEFAULT_IDLE.clearOnSwitch),
+      figletMessages: readString(file, "idle_figlet_messages", DEFAULT_IDLE.figletMessages),
+      figletRefresh: readNumber(file, "idle_figlet_refresh", DEFAULT_IDLE.figletRefresh),
+      figletFonts: readString(file, "idle_figlet_fonts", DEFAULT_IDLE.figletFonts),
+      figletColors: readBool(file, "idle_figlet_colors", DEFAULT_IDLE.figletColors),
+      figletMove: readBool(file, "idle_figlet_move", DEFAULT_IDLE.figletMove),
+      useAvatarFrames: readBool(file, "idle_use_avatar_frames", DEFAULT_IDLE.useAvatarFrames),
+      starCount: readNumber(file, "idle_star_count", DEFAULT_IDLE.starCount),
+      auroraSpeed: readFloat(file, "idle_aurora_speed", DEFAULT_IDLE.auroraSpeed),
+      auroraWave: readFloat(file, "idle_aurora_wave", DEFAULT_IDLE.auroraWave),
+      matrixSparse: readNumber(file, "idle_matrix_sparse", DEFAULT_IDLE.matrixSparse),
+      plasmaSpeed: readFloat(file, "idle_plasma_speed", DEFAULT_IDLE.plasmaSpeed),
+      plasmaScale: readFloat(file, "idle_plasma_scale", DEFAULT_IDLE.plasmaScale),
+      tunnelSpeed: readFloat(file, "idle_tunnel_speed", DEFAULT_IDLE.tunnelSpeed),
+      tunnelScale: readFloat(file, "idle_tunnel_scale", DEFAULT_IDLE.tunnelScale),
+      lissajousSpeed: readFloat(file, "idle_lissajous_speed", DEFAULT_IDLE.lissajousSpeed),
+      fireDecay: readNumber(file, "idle_fire_decay", DEFAULT_IDLE.fireDecay),
+      rippleCount: readNumber(file, "idle_ripple_count", DEFAULT_IDLE.rippleCount)
+    };
+  }
   function loadConfig() {
     var configPath = js.exec_dir + "avatar_chat.ini";
     var file = new File(configPath);
@@ -3113,7 +3460,8 @@ load("json-chat.js");
       maxHistory: DEFAULT_CONFIG.maxHistory,
       pollDelayMs: DEFAULT_CONFIG.pollDelayMs,
       reconnectDelayMs: DEFAULT_CONFIG.reconnectDelayMs,
-      inputMaxLength: DEFAULT_CONFIG.inputMaxLength
+      inputMaxLength: DEFAULT_CONFIG.inputMaxLength,
+      idleAnimations: DEFAULT_IDLE
     };
     if (!file.open("r")) {
       return config;
@@ -3125,6 +3473,7 @@ load("json-chat.js");
     config.pollDelayMs = readNumber(file, "poll_delay_ms", DEFAULT_CONFIG.pollDelayMs);
     config.reconnectDelayMs = readNumber(file, "reconnect_delay_ms", DEFAULT_CONFIG.reconnectDelayMs);
     config.inputMaxLength = readNumber(file, "input_max_length", DEFAULT_CONFIG.inputMaxLength);
+    config.idleAnimations = loadIdleAnimConfig(file);
     file.close();
     if (config.port < 1) {
       config.port = DEFAULT_CONFIG.port;
@@ -3145,7 +3494,24 @@ load("json-chat.js");
   }
 
   // build/main.js
+  function loadIdleAnimationModules() {
+    try {
+      if (!js.global.CanvasAnimations) {
+        js.global.CanvasAnimations = load(js.exec_dir + "lib/canvas-animations.js");
+      }
+    } catch (error) {
+      log("Avatar Chat: canvas-animations.js unavailable: " + String(error));
+    }
+    try {
+      if (!js.global.AvatarsFloat) {
+        js.global.AvatarsFloat = load(js.exec_dir + "lib/avatars-float.js");
+      }
+    } catch (error) {
+      log("Avatar Chat: avatars-float.js unavailable: " + String(error));
+    }
+  }
   function main() {
+    loadIdleAnimationModules();
     var app = new AvatarChatApp(loadConfig());
     try {
       app.run();
