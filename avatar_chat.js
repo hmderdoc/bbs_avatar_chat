@@ -1,5 +1,5 @@
 // Avatar Chat - Auto-generated, do not edit directly.
-// Built: 2026-03-22T20:38:18.857Z
+// Built: 2026-03-22T22:00:00.181Z
 load("sbbsdefs.js");
 load("key_defs.js");
 load("frame.js");
@@ -1213,10 +1213,11 @@ load("json-chat.js");
         this.lastPrivateHistorySyncAt = 0;
         this.lastKeyTimestamp = Date.now();
         this.idleAnimActive = false;
-        this.bgAnimMgr = null;
-        this.fgAnimMgr = null;
+        this.animMgr = null;
+        this.animFrame = "";
         this.idleTickInterval = 0;
         this.lastAnimTickAt = 0;
+        this.embeddedAvatars = {};
         try {
           this.avatarLib = load({}, "avatar_lib.js");
         } catch (error) {
@@ -1501,6 +1502,12 @@ load("json-chat.js");
           }
           for (index = 0; index < channel.messages.length; index += 1) {
             var message = channel.messages[index];
+            if (message && message.nick && message.nick.avatar) {
+              var avatarData = String(message.nick.avatar).replace(/^\s+|\s+$/g, "");
+              if (avatarData.length) {
+                this.embeddedAvatars[message.nick.name.toUpperCase()] = avatarData;
+              }
+            }
             if (!message || !this.rememberPublicChannelMessage(channel.name, message)) {
               continue;
             }
@@ -2427,7 +2434,8 @@ load("json-chat.js");
             name: name,
             host: bbs2,
             ip: nickValue.ip || rawEntry.ip || void 0,
-            qwkid: nickValue.qwkid || rawEntry.qwkid || void 0
+            qwkid: nickValue.qwkid || rawEntry.qwkid || void 0,
+            avatar: nickValue.avatar || void 0
           };
         } else {
           name = trimText(String(nickValue || rawEntry.name || rawEntry.alias || rawEntry.user || ""));
@@ -2438,6 +2446,12 @@ load("json-chat.js");
               host: bbs2,
               qwkid: rawEntry.qwkid || void 0
             };
+          }
+        }
+        if (nick && !nick.avatar && name.length) {
+          var embedded = this.embeddedAvatars[name.toUpperCase()];
+          if (embedded) {
+            nick.avatar = embedded;
           }
         }
         if (!name.length) {
@@ -2773,8 +2787,8 @@ load("json-chat.js");
         if (this.idleAnimActive) {
           this.stopIdleAnimations();
         }
-        this.bgAnimMgr = null;
-        this.fgAnimMgr = null;
+        this.animMgr = null;
+        this.animFrame = "";
         this.destroyModalFrames();
         if (this.frames.input) {
           this.frames.input.close();
@@ -2811,7 +2825,52 @@ load("json-chat.js");
         this.frames.width = 0;
         this.frames.height = 0;
       };
+      AvatarChatApp2.prototype.collectChatNicks = function() {
+        var nicks = [];
+        var seen = {};
+        var key = "";
+        if (!this.chat) {
+          return nicks;
+        }
+        for (key in this.chat.channels) {
+          if (!Object.prototype.hasOwnProperty.call(this.chat.channels, key)) {
+            continue;
+          }
+          var channel = this.chat.channels[key];
+          if (!channel) {
+            continue;
+          }
+          var msgIndex = 0;
+          for (msgIndex = 0; msgIndex < channel.messages.length; msgIndex += 1) {
+            var message = channel.messages[msgIndex];
+            if (message && message.nick && message.nick.avatar) {
+              var avatarStr = String(message.nick.avatar).replace(/^\s+|\s+$/g, "");
+              if (avatarStr.length) {
+                this.embeddedAvatars[message.nick.name.toUpperCase()] = avatarStr;
+              }
+            }
+          }
+          if (!channel.users) {
+            continue;
+          }
+          var userIndex = 0;
+          for (userIndex = 0; userIndex < channel.users.length; userIndex += 1) {
+            var rosterEntry = this.extractRosterEntry(channel.users[userIndex]);
+            if (!rosterEntry || !rosterEntry.nick || !rosterEntry.nick.name) {
+              continue;
+            }
+            var nickKey = rosterEntry.nick.name.toUpperCase();
+            if (seen[nickKey]) {
+              continue;
+            }
+            seen[nickKey] = true;
+            nicks.push(rosterEntry.nick);
+          }
+        }
+        return nicks;
+      };
       AvatarChatApp2.prototype.buildAnimOpts = function() {
+        var _this = this;
         var cfg = this.config.idleAnimations;
         return {
           switch_interval: cfg.switchInterval,
@@ -2827,6 +2886,9 @@ load("json-chat.js");
           figlet_move: cfg.figletMove,
           use_avatar_frames: cfg.useAvatarFrames,
           avatar_lib: this.avatarLib || void 0,
+          getChatNicks: function() {
+            return _this.collectChatNicks();
+          },
           star_count: cfg.starCount,
           aurora_speed: cfg.auroraSpeed,
           aurora_wave: cfg.auroraWave,
@@ -2858,59 +2920,51 @@ load("json-chat.js");
           }
         }
         var opts = this.buildAnimOpts();
-        var bgSeq = [];
-        var fgSeq = [];
-        if (cfg.sequence.length) {
-          for (var i = 0; i < cfg.sequence.length; i++) {
-            var name = cfg.sequence[i];
-            if (!name) {
-              continue;
-            }
-            if (AvatarChatApp2.FOREGROUND_ANIMATIONS.indexOf(name) >= 0) {
-              fgSeq.push(name);
-            } else {
-              bgSeq.push(name);
-            }
-          }
+        var animBg = this.frames.animBg;
+        var animFg = this.frames.animFg;
+        var fgSet = {};
+        for (var i = 0; i < AvatarChatApp2.FOREGROUND_ANIMATIONS.length; i++) {
+          var fgName = AvatarChatApp2.FOREGROUND_ANIMATIONS[i];
+          if (fgName)
+            fgSet[fgName] = true;
         }
-        if (this.frames.animBg) {
-          var bgOpts = {};
-          for (var k in opts) {
-            if (Object.prototype.hasOwnProperty.call(opts, k))
-              bgOpts[k] = opts[k];
+        var self = this;
+        opts.frameForAnim = function(name2, _defaultFrame) {
+          if (fgSet[name2]) {
+            if (animBg) {
+              try {
+                animBg.clear();
+                animBg.invalidate();
+              } catch (_e) {
+              }
+            }
+            self.animFrame = "fg";
+            return animFg || _defaultFrame;
           }
-          bgOpts.sequence = bgSeq.length ? bgSeq : void 0;
-          this.bgAnimMgr = new CA.AnimationManager(this.frames.animBg, bgOpts);
-          for (var name in AvatarChatApp2.BG_ANIMATION_MAP) {
-            var ctorKey = AvatarChatApp2.BG_ANIMATION_MAP[name];
-            if (!ctorKey) {
-              continue;
-            }
-            if (!disableSet[name] && CA[ctorKey]) {
-              this.bgAnimMgr.add(name, CA[ctorKey]);
+          if (animFg) {
+            try {
+              animFg.clear();
+              animFg.invalidate();
+            } catch (_e) {
             }
           }
-        }
-        if (this.frames.animFg) {
-          var fgOpts = {};
-          for (var k in opts) {
-            if (Object.prototype.hasOwnProperty.call(opts, k))
-              fgOpts[k] = opts[k];
-          }
-          fgOpts.sequence = fgSeq.length ? fgSeq : void 0;
-          this.fgAnimMgr = new CA.AnimationManager(this.frames.animFg, fgOpts);
-          for (var name in AvatarChatApp2.FG_ANIMATION_MAP) {
-            if (disableSet[name])
-              continue;
-            var ctorKey = AvatarChatApp2.FG_ANIMATION_MAP[name];
-            if (!ctorKey) {
-              continue;
-            }
-            if (name === "avatars_float" && AF && AF.AvatarsFloat) {
-              this.fgAnimMgr.add(name, AF.AvatarsFloat);
-            } else if (CA[ctorKey]) {
-              this.fgAnimMgr.add(name, CA[ctorKey]);
-            }
+          self.animFrame = "bg";
+          return animBg || _defaultFrame;
+        };
+        var defaultFrame = animBg || animFg;
+        if (!defaultFrame)
+          return;
+        this.animMgr = new CA.AnimationManager(defaultFrame, opts);
+        for (var name in AvatarChatApp2.ANIMATION_MAP) {
+          if (disableSet[name])
+            continue;
+          var ctorKey = AvatarChatApp2.ANIMATION_MAP[name];
+          if (!ctorKey)
+            continue;
+          if (name === "avatars_float" && AF && AF.AvatarsFloat) {
+            this.animMgr.add(name, AF.AvatarsFloat);
+          } else if (CA[ctorKey]) {
+            this.animMgr.add(name, CA[ctorKey]);
           }
         }
         this.idleTickInterval = Math.max(50, Math.floor(1e3 / Math.max(1, cfg.fps)));
@@ -2918,62 +2972,47 @@ load("json-chat.js");
       AvatarChatApp2.prototype.startIdleAnimations = function() {
         if (this.idleAnimActive)
           return;
-        if (!this.bgAnimMgr && !this.fgAnimMgr) {
+        if (!this.animMgr) {
           this.initIdleAnimManagers();
         }
-        if (!this.bgAnimMgr && !this.fgAnimMgr)
+        if (!this.animMgr)
           return;
         this.idleAnimActive = true;
         this.lastAnimTickAt = Date.now();
-        if (this.bgAnimMgr) {
-          try {
-            this.bgAnimMgr.start();
-          } catch (e) {
-            log("Avatar Chat: bg animation start error: " + String(e));
-          }
-        }
-        if (this.fgAnimMgr) {
-          try {
-            this.fgAnimMgr.start();
-          } catch (e) {
-            log("Avatar Chat: fg animation start error: " + String(e));
-          }
+        try {
+          this.animMgr.start();
+        } catch (e) {
+          log("Avatar Chat: animation start error: " + String(e));
         }
       };
       AvatarChatApp2.prototype.stopIdleAnimations = function() {
         if (!this.idleAnimActive)
           return;
         this.idleAnimActive = false;
-        if (this.bgAnimMgr) {
+        if (this.animMgr) {
           try {
-            this.bgAnimMgr.dispose();
-          } catch (e) {
-          }
-        }
-        if (this.fgAnimMgr) {
-          try {
-            this.fgAnimMgr.dispose();
-          } catch (e) {
+            this.animMgr.dispose();
+          } catch (_e) {
           }
         }
         if (this.frames.animBg) {
           try {
             this.frames.animBg.clear();
             this.frames.animBg.invalidate();
-          } catch (e) {
+          } catch (_e) {
           }
         }
         if (this.frames.animFg) {
           try {
             this.frames.animFg.clear();
             this.frames.animFg.invalidate();
-          } catch (e) {
+          } catch (_e) {
           }
         }
         if (this.frames.transcript) {
           try {
             this.frames.transcript.invalidate();
-          } catch (e) {
+          } catch (_e) {
           }
         }
         this.resetRenderSignatures();
@@ -2994,23 +3033,14 @@ load("json-chat.js");
           return;
         }
         this.lastAnimTickAt = now;
-        var switchNow = now - this.lastKeyTimestamp > 0 && this.bgAnimMgr && this.bgAnimMgr.lastSwitch && time() - this.bgAnimMgr.lastSwitch >= cfg.switchInterval;
-        if (this.bgAnimMgr) {
+        var switchNow = this.animMgr && this.animMgr.lastSwitch && time() - this.animMgr.lastSwitch >= cfg.switchInterval;
+        if (this.animMgr) {
           try {
             if (switchNow)
-              this.bgAnimMgr.start();
-            this.bgAnimMgr.tick();
+              this.animMgr.start();
+            this.animMgr.tick();
           } catch (e) {
-            log("Avatar Chat: bg animation tick error: " + String(e));
-          }
-        }
-        if (this.fgAnimMgr) {
-          try {
-            if (switchNow)
-              this.fgAnimMgr.start();
-            this.fgAnimMgr.tick();
-          } catch (e) {
-            log("Avatar Chat: fg animation tick error: " + String(e));
+            log("Avatar Chat: animation tick error: " + String(e));
           }
         }
       };
@@ -3312,7 +3342,8 @@ load("json-chat.js");
         return parts.join("|");
       };
       AvatarChatApp2.FOREGROUND_ANIMATIONS = ["figlet_message", "avatars_float"];
-      AvatarChatApp2.BG_ANIMATION_MAP = {
+      AvatarChatApp2.ANIMATION_MAP = {
+        // Background-preference animations
         tv_static: "TvStatic",
         matrix_rain: "MatrixRain",
         life: "Life",
@@ -3327,9 +3358,8 @@ load("json-chat.js");
         ocean_ripple: "OceanRipple",
         lissajous: "LissajousTrails",
         lightning: "LightningStorm",
-        tunnel: "RecursiveTunnel"
-      };
-      AvatarChatApp2.FG_ANIMATION_MAP = {
+        tunnel: "RecursiveTunnel",
+        // Foreground-preference animations
         figlet_message: "FigletMessage",
         avatars_float: "AvatarsFloat"
       };
@@ -3496,16 +3526,12 @@ load("json-chat.js");
   // build/main.js
   function loadIdleAnimationModules() {
     try {
-      if (!js.global.CanvasAnimations) {
-        js.global.CanvasAnimations = load(js.exec_dir + "lib/canvas-animations.js");
-      }
+      js.global.CanvasAnimations = load(js.exec_dir + "lib/canvas-animations.js");
     } catch (error) {
       log("Avatar Chat: canvas-animations.js unavailable: " + String(error));
     }
     try {
-      if (!js.global.AvatarsFloat) {
-        js.global.AvatarsFloat = load(js.exec_dir + "lib/avatars-float.js");
-      }
+      js.global.AvatarsFloat = load(js.exec_dir + "lib/avatars-float.js");
     } catch (error) {
       log("Avatar Chat: avatars-float.js unavailable: " + String(error));
     }

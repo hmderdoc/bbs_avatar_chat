@@ -112,10 +112,11 @@ export class AvatarChatApp {
   private lastPrivateHistorySyncAt: number;
   private lastKeyTimestamp: number;
   private idleAnimActive: boolean;
-  private bgAnimMgr: any;
-  private fgAnimMgr: any;
+  private animMgr: any;
+  private animFrame: string;
   private idleTickInterval: number;
   private lastAnimTickAt: number;
+  private embeddedAvatars: { [nameUpper: string]: string };
 
   public constructor(config: AvatarChatConfig) {
     this.config = config;
@@ -164,10 +165,11 @@ export class AvatarChatApp {
     this.lastPrivateHistorySyncAt = 0;
     this.lastKeyTimestamp = Date.now();
     this.idleAnimActive = false;
-    this.bgAnimMgr = null;
-    this.fgAnimMgr = null;
+    this.animMgr = null;
+    this.animFrame = "";
     this.idleTickInterval = 0;
     this.lastAnimTickAt = 0;
+    this.embeddedAvatars = {};
 
     try {
       this.avatarLib = load({}, "avatar_lib.js") as AvatarLibrary;
@@ -529,6 +531,13 @@ export class AvatarChatApp {
 
       for (index = 0; index < channel.messages.length; index += 1) {
         const message = channel.messages[index];
+
+        if (message && message.nick && message.nick.avatar) {
+          const avatarData = String(message.nick.avatar).replace(/^\s+|\s+$/g, "");
+          if (avatarData.length) {
+            this.embeddedAvatars[message.nick.name.toUpperCase()] = avatarData;
+          }
+        }
 
         if (!message || !this.rememberPublicChannelMessage(channel.name, message)) {
           continue;
@@ -1671,7 +1680,8 @@ export class AvatarChatApp {
         name: name,
         host: bbs,
         ip: nickValue.ip || rawEntry.ip || undefined,
-        qwkid: nickValue.qwkid || rawEntry.qwkid || undefined
+        qwkid: nickValue.qwkid || rawEntry.qwkid || undefined,
+        avatar: nickValue.avatar || undefined
       };
     } else {
       name = trimText(String(nickValue || rawEntry.name || rawEntry.alias || rawEntry.user || ""));
@@ -1682,6 +1692,13 @@ export class AvatarChatApp {
           host: bbs,
           qwkid: rawEntry.qwkid || undefined
         };
+      }
+    }
+
+    if (nick && !nick.avatar && name.length) {
+      const embedded = this.embeddedAvatars[name.toUpperCase()];
+      if (embedded) {
+        nick.avatar = embedded;
       }
     }
 
@@ -2129,8 +2146,8 @@ export class AvatarChatApp {
     if (this.idleAnimActive) {
       this.stopIdleAnimations();
     }
-    this.bgAnimMgr = null;
-    this.fgAnimMgr = null;
+    this.animMgr = null;
+    this.animFrame = "";
 
     this.destroyModalFrames();
 
@@ -2174,11 +2191,12 @@ export class AvatarChatApp {
 
   // ---- Idle Animation System ----
 
-  /** Names of animations that render on the FOREGROUND (above chat content) */
+  /** Names of animations that render on the FOREGROUND frame (above chat content) */
   private static readonly FOREGROUND_ANIMATIONS: string[] = ["figlet_message", "avatars_float"];
 
-  /** All background animation registrations: name -> CanvasAnimations constructor key */
-  private static readonly BG_ANIMATION_MAP: { [name: string]: string } = {
+  /** Unified animation registry: name -> constructor key in CanvasAnimations (or special handling) */
+  private static readonly ANIMATION_MAP: { [name: string]: string } = {
+    // Background-preference animations
     tv_static: "TvStatic",
     matrix_rain: "MatrixRain",
     life: "Life",
@@ -2193,14 +2211,67 @@ export class AvatarChatApp {
     ocean_ripple: "OceanRipple",
     lissajous: "LissajousTrails",
     lightning: "LightningStorm",
-    tunnel: "RecursiveTunnel"
-  };
-
-  /** All foreground animation registrations */
-  private static readonly FG_ANIMATION_MAP: { [name: string]: string } = {
+    tunnel: "RecursiveTunnel",
+    // Foreground-preference animations
     figlet_message: "FigletMessage",
     avatars_float: "AvatarsFloat"
   };
+
+  private collectChatNicks(): ChatNick[] {
+    const nicks: ChatNick[] = [];
+    const seen: { [key: string]: boolean } = {};
+    let key = "";
+
+    if (!this.chat) {
+      return nicks;
+    }
+
+    for (key in this.chat.channels) {
+      if (!Object.prototype.hasOwnProperty.call(this.chat.channels, key)) {
+        continue;
+      }
+
+      const channel = this.chat.channels[key] as ChatChannel;
+      if (!channel) {
+        continue;
+      }
+
+      // Harvest embedded avatar data from recent messages
+      let msgIndex = 0;
+      for (msgIndex = 0; msgIndex < channel.messages.length; msgIndex += 1) {
+        const message = channel.messages[msgIndex];
+        if (message && message.nick && message.nick.avatar) {
+          const avatarStr = String(message.nick.avatar).replace(/^\s+|\s+$/g, "");
+          if (avatarStr.length) {
+            this.embeddedAvatars[message.nick.name.toUpperCase()] = avatarStr;
+          }
+        }
+      }
+
+      // Collect nicks from user list, enriching with harvested avatar data
+      if (!channel.users) {
+        continue;
+      }
+
+      let userIndex = 0;
+      for (userIndex = 0; userIndex < channel.users.length; userIndex += 1) {
+        const rosterEntry = this.extractRosterEntry(channel.users[userIndex]);
+        if (!rosterEntry || !rosterEntry.nick || !rosterEntry.nick.name) {
+          continue;
+        }
+
+        const nickKey = rosterEntry.nick.name.toUpperCase();
+        if (seen[nickKey]) {
+          continue;
+        }
+        seen[nickKey] = true;
+
+        nicks.push(rosterEntry.nick);
+      }
+    }
+
+    return nicks;
+  }
 
   private buildAnimOpts(): { [key: string]: any } {
     const cfg = this.config.idleAnimations;
@@ -2218,6 +2289,7 @@ export class AvatarChatApp {
       figlet_move: cfg.figletMove,
       use_avatar_frames: cfg.useAvatarFrames,
       avatar_lib: this.avatarLib || undefined,
+      getChatNicks: (): ChatNick[] => this.collectChatNicks(),
       star_count: cfg.starCount,
       aurora_speed: cfg.auroraSpeed,
       aurora_wave: cfg.auroraWave,
@@ -2232,6 +2304,13 @@ export class AvatarChatApp {
     };
   }
 
+  /**
+   * Initialise ONE AnimationManager that holds every registered animation.
+   * Each animation has a *frame preference* (foreground or background).
+   * When the manager switches to a new animation, the frameForAnim callback
+   * returns the correct frame and clears the previously-used one so only a
+   * single animation is ever visible at any given time.
+   */
   private initIdleAnimManagers(): void {
     const cfg = this.config.idleAnimations;
     if (!cfg.enabled) return;
@@ -2253,57 +2332,46 @@ export class AvatarChatApp {
 
     const opts = this.buildAnimOpts();
 
-    // Build background-only and foreground-only sequence arrays
-    const bgSeq: string[] = [];
-    const fgSeq: string[] = [];
-    if (cfg.sequence.length) {
-      for (let i = 0; i < cfg.sequence.length; i++) {
-        const name = cfg.sequence[i];
-        if (!name) {
-          continue;
-        }
-        if (AvatarChatApp.FOREGROUND_ANIMATIONS.indexOf(name) >= 0) {
-          fgSeq.push(name);
-        } else {
-          bgSeq.push(name);
-        }
-      }
+    // Capture frame refs for the closure
+    const animBg = this.frames.animBg;
+    const animFg = this.frames.animFg;
+    const fgSet: { [name: string]: boolean } = {};
+    for (let i = 0; i < AvatarChatApp.FOREGROUND_ANIMATIONS.length; i++) {
+      const fgName = AvatarChatApp.FOREGROUND_ANIMATIONS[i];
+      if (fgName) fgSet[fgName] = true;
     }
 
-    // Background manager
-    if (this.frames.animBg) {
-      const bgOpts: any = {};
-      for (const k in opts) { if (Object.prototype.hasOwnProperty.call(opts, k)) bgOpts[k] = opts[k]; }
-      bgOpts.sequence = bgSeq.length ? bgSeq : undefined;
-      this.bgAnimMgr = new CA.AnimationManager(this.frames.animBg, bgOpts);
-      for (const name in AvatarChatApp.BG_ANIMATION_MAP) {
-        const ctorKey = AvatarChatApp.BG_ANIMATION_MAP[name];
-        if (!ctorKey) {
-          continue;
-        }
-        if (!disableSet[name] && CA[ctorKey]) {
-          this.bgAnimMgr.add(name, CA[ctorKey]);
-        }
+    // frameForAnim callback: returns the preferred frame for this animation
+    // and clears the OTHER frame so only one animation is visible.
+    const self = this;
+    opts.frameForAnim = function (name: string, _defaultFrame: any): any {
+      if (fgSet[name]) {
+        // Foreground animation – clear bg frame
+        if (animBg) { try { animBg.clear(); animBg.invalidate(); } catch (_e) {} }
+        self.animFrame = "fg";
+        return animFg || _defaultFrame;
       }
-    }
+      // Background animation – clear fg frame
+      if (animFg) { try { animFg.clear(); animFg.invalidate(); } catch (_e) {} }
+      self.animFrame = "bg";
+      return animBg || _defaultFrame;
+    };
 
-    // Foreground manager
-    if (this.frames.animFg) {
-      const fgOpts: any = {};
-      for (const k in opts) { if (Object.prototype.hasOwnProperty.call(opts, k)) fgOpts[k] = opts[k]; }
-      fgOpts.sequence = fgSeq.length ? fgSeq : undefined;
-      this.fgAnimMgr = new CA.AnimationManager(this.frames.animFg, fgOpts);
-      for (const name in AvatarChatApp.FG_ANIMATION_MAP) {
-        if (disableSet[name]) continue;
-        const ctorKey = AvatarChatApp.FG_ANIMATION_MAP[name];
-        if (!ctorKey) {
-          continue;
-        }
-        if (name === "avatars_float" && AF && AF.AvatarsFloat) {
-          this.fgAnimMgr.add(name, AF.AvatarsFloat);
-        } else if (CA[ctorKey]) {
-          this.fgAnimMgr.add(name, CA[ctorKey]);
-        }
+    // Create ONE manager; default frame is animBg (most animations are bg)
+    const defaultFrame = animBg || animFg;
+    if (!defaultFrame) return;
+    this.animMgr = new CA.AnimationManager(defaultFrame, opts);
+
+    // Register all animations from the unified map
+    for (const name in AvatarChatApp.ANIMATION_MAP) {
+      if (disableSet[name]) continue;
+      const ctorKey = AvatarChatApp.ANIMATION_MAP[name];
+      if (!ctorKey) continue;
+
+      if (name === "avatars_float" && AF && AF.AvatarsFloat) {
+        this.animMgr.add(name, AF.AvatarsFloat);
+      } else if (CA[ctorKey]) {
+        this.animMgr.add(name, CA[ctorKey]);
       }
     }
 
@@ -2313,23 +2381,18 @@ export class AvatarChatApp {
 
   private startIdleAnimations(): void {
     if (this.idleAnimActive) return;
-    if (!this.bgAnimMgr && !this.fgAnimMgr) {
+    if (!this.animMgr) {
       this.initIdleAnimManagers();
     }
-    if (!this.bgAnimMgr && !this.fgAnimMgr) return;
+    if (!this.animMgr) return;
 
     this.idleAnimActive = true;
     this.lastAnimTickAt = Date.now();
 
-    if (this.bgAnimMgr) {
-      try { this.bgAnimMgr.start(); } catch (e) {
-        log("Avatar Chat: bg animation start error: " + String(e));
-      }
-    }
-    if (this.fgAnimMgr) {
-      try { this.fgAnimMgr.start(); } catch (e) {
-        log("Avatar Chat: fg animation start error: " + String(e));
-      }
+    try {
+      this.animMgr.start();
+    } catch (e) {
+      log("Avatar Chat: animation start error: " + String(e));
     }
   }
 
@@ -2337,22 +2400,19 @@ export class AvatarChatApp {
     if (!this.idleAnimActive) return;
     this.idleAnimActive = false;
 
-    if (this.bgAnimMgr) {
-      try { this.bgAnimMgr.dispose(); } catch (e) {}
-    }
-    if (this.fgAnimMgr) {
-      try { this.fgAnimMgr.dispose(); } catch (e) {}
+    if (this.animMgr) {
+      try { this.animMgr.dispose(); } catch (_e) {}
     }
 
-    // Clear animation frames and force transcript redraw
+    // Clear both animation frames and force transcript redraw
     if (this.frames.animBg) {
-      try { this.frames.animBg.clear(); this.frames.animBg.invalidate(); } catch (e) {}
+      try { this.frames.animBg.clear(); this.frames.animBg.invalidate(); } catch (_e) {}
     }
     if (this.frames.animFg) {
-      try { this.frames.animFg.clear(); this.frames.animFg.invalidate(); } catch (e) {}
+      try { this.frames.animFg.clear(); this.frames.animFg.invalidate(); } catch (_e) {}
     }
     if (this.frames.transcript) {
-      try { this.frames.transcript.invalidate(); } catch (e) {}
+      try { this.frames.transcript.invalidate(); } catch (_e) {}
     }
     this.resetRenderSignatures();
   }
@@ -2378,25 +2438,16 @@ export class AvatarChatApp {
     }
     this.lastAnimTickAt = now;
 
-    // Check if it's time to switch animations (uses manager's internal timer)
-    const switchNow = (now - this.lastKeyTimestamp) > 0 &&
-      this.bgAnimMgr && this.bgAnimMgr.lastSwitch &&
-      (time() - this.bgAnimMgr.lastSwitch) >= cfg.switchInterval;
+    // Check if it's time to switch to the next animation
+    const switchNow = this.animMgr && this.animMgr.lastSwitch &&
+      (time() - this.animMgr.lastSwitch) >= cfg.switchInterval;
 
-    if (this.bgAnimMgr) {
+    if (this.animMgr) {
       try {
-        if (switchNow) this.bgAnimMgr.start();
-        this.bgAnimMgr.tick();
+        if (switchNow) this.animMgr.start();
+        this.animMgr.tick();
       } catch (e) {
-        log("Avatar Chat: bg animation tick error: " + String(e));
-      }
-    }
-    if (this.fgAnimMgr) {
-      try {
-        if (switchNow) this.fgAnimMgr.start();
-        this.fgAnimMgr.tick();
-      } catch (e) {
-        log("Avatar Chat: fg animation tick error: " + String(e));
+        log("Avatar Chat: animation tick error: " + String(e));
       }
     }
   }
