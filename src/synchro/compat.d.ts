@@ -5,6 +5,7 @@ declare function log(level: number, text: string): void;
 declare function log(text: string): void;
 declare function base64_decode(data: string): string;
 declare function ascii(text: string): number;
+declare function ascii(code: number): string;
 declare function mswait(milliseconds: number): void;
 declare function md5_calc(text: string): string;
 declare function time(): number;

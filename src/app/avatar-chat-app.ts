@@ -1,4 +1,5 @@
 import { buildNoticeMessage, normalizeChannelName, trimChannelMessages } from "../domain/chat-model";
+import { BitmapCell, BitmapEntry, decodeBitmap, isBitmapMessage, parseBitmapMessage } from "../domain/bitmap";
 import { buildPrivateMessage, buildPrivateThreadId, buildPrivateThreadName, isPrivateMessage, normalizePrivateNick, resolvePrivatePeerNick } from "../domain/private-messages";
 import { ACTION_BAR_ACTIONS, ActionBarAction, AppModalState, ChannelListEntry, RosterEntry } from "../domain/ui";
 import { InputBuffer } from "../input/input-buffer";
@@ -62,6 +63,7 @@ const INPUT_ESCAPE_SEQUENCE_MAP: { [sequence: string]: string } = {
 const INPUT_ESCAPE_SEQUENCE_PREFIXES: { [prefix: string]: boolean } = {
   "\x1b": true
 };
+const BITMAP_MAX_HISTORY = 20;
 
 (function seedInputEscapePrefixes(): void {
   let sequence = "";
@@ -118,6 +120,13 @@ export class AvatarChatApp {
   private lastAnimTickAt: number;
   private embeddedAvatars: { [nameUpper: string]: string };
   private userBbsCache: { [nameUpper: string]: string };
+  private bitmapQueue: BitmapEntry[];
+  private bitmapViewerActive: boolean;
+  private bitmapViewerIndex: number;
+  private bitmapViewerScrollY: number;
+  private bitmapViewerUse256Color: boolean;
+  private bitmapViewerSignature: string;
+  private unviewedBitmapCount: number;
 
   public constructor(config: AvatarChatConfig) {
     this.config = config;
@@ -172,6 +181,13 @@ export class AvatarChatApp {
     this.lastAnimTickAt = 0;
     this.embeddedAvatars = {};
     this.userBbsCache = {};
+    this.bitmapQueue = [];
+    this.bitmapViewerActive = false;
+    this.bitmapViewerIndex = -1;
+    this.bitmapViewerScrollY = 0;
+    this.bitmapViewerUse256Color = true;
+    this.bitmapViewerSignature = "";
+    this.unviewedBitmapCount = 0;
 
     try {
       this.avatarLib = load({}, "avatar_lib.js") as AvatarLibrary;
@@ -239,6 +255,13 @@ export class AvatarChatApp {
       this.publicChannelMessageKeys = {};
       this.publicChannelUnreadCounts = {};
       this.lastPrivateHistorySyncAt = 0;
+      this.bitmapQueue = [];
+      this.bitmapViewerActive = false;
+      this.bitmapViewerIndex = -1;
+      this.bitmapViewerScrollY = 0;
+      this.bitmapViewerUse256Color = true;
+      this.bitmapViewerSignature = "";
+      this.unviewedBitmapCount = 0;
 
       for (index = 0; index < desiredChannels.length; index += 1) {
         const desiredChannel = desiredChannels[index];
@@ -371,6 +394,7 @@ export class AvatarChatApp {
     thread = this.ensurePrivateThread(peerNick);
     thread.messages.push(message);
     trimChannelMessages(thread as any, this.config.maxHistory);
+    this.processBitmapMessage(thread.name, message);
 
     if (
       markUnread &&
@@ -481,6 +505,276 @@ export class AvatarChatApp {
     this.chat.client.write("chat", location, [], 2);
   }
 
+  private normalizeBitmapSenderName(name: string): string {
+    const trimmed = trimText(name);
+
+    if (trimmed.indexOf("BLOCKBRAIN:") === 0) {
+      return trimText(trimmed.substr(11));
+    }
+
+    if (trimmed.indexOf("DISCORD:") === 0) {
+      return trimText(trimmed.substr(8));
+    }
+
+    return trimmed;
+  }
+
+  private processBitmapMessage(sourceChannel: string, message: ChatMessage): boolean {
+    const text = message && message.str ? String(message.str) : "";
+    const parsed = parseBitmapMessage(text);
+    let decoded;
+    let sender = "";
+    let entry: BitmapEntry;
+
+    if (!parsed) {
+      return false;
+    }
+
+    try {
+      decoded = decodeBitmap(parsed.hexData, parsed.width, parsed.height);
+    } catch (error) {
+      log("Avatar Chat bitmap decode error: " + String(error));
+      this.appendViewNotice(sourceChannel, "Received an image payload that could not be decoded.");
+      return false;
+    }
+
+    if (!decoded.bitmap.length) {
+      this.appendViewNotice(sourceChannel, "Received an empty image payload.");
+      return false;
+    }
+
+    sender = this.normalizeBitmapSenderName(parsed.fromName || (message.nick && message.nick.name ? message.nick.name : "Image"));
+    if (!sender.length) {
+      sender = "Image";
+    }
+
+    entry = {
+      bitmap: decoded.bitmap,
+      width: decoded.width,
+      height: decoded.height,
+      actualWidth: decoded.actualWidth,
+      actualHeight: decoded.actualHeight,
+      fromName: sender,
+      sourceChannel: sourceChannel,
+      time: message && message.time ? message.time : new Date().getTime()
+    };
+
+    this.bitmapQueue.push(entry);
+    while (this.bitmapQueue.length > BITMAP_MAX_HISTORY) {
+      this.bitmapQueue.shift();
+      if (this.bitmapViewerIndex > 0) {
+        this.bitmapViewerIndex -= 1;
+      }
+    }
+
+    if (this.bitmapQueue.length && this.bitmapViewerIndex >= this.bitmapQueue.length) {
+      this.bitmapViewerIndex = this.bitmapQueue.length - 1;
+    }
+
+    this.unviewedBitmapCount += 1;
+    if (this.unviewedBitmapCount > this.bitmapQueue.length) {
+      this.unviewedBitmapCount = this.bitmapQueue.length;
+    }
+
+    this.actionSignature = "";
+    this.statusSignature = "";
+    this.bitmapViewerSignature = "";
+    return true;
+  }
+
+  private getRenderableMessages(messages: ChatMessage[]): ChatMessage[] {
+    const visible: ChatMessage[] = [];
+    let index = 0;
+
+    for (index = 0; index < messages.length; index += 1) {
+      const message = messages[index];
+      if (!message) {
+        continue;
+      }
+      if (message.str && isBitmapMessage(String(message.str))) {
+        continue;
+      }
+      visible.push(message);
+    }
+
+    return visible;
+  }
+
+  private hasImagesForView(viewName: string): boolean {
+    const normalized = trimText(viewName).toUpperCase();
+    let index = 0;
+
+    if (!normalized.length) {
+      return false;
+    }
+
+    for (index = 0; index < this.bitmapQueue.length; index += 1) {
+      const entry = this.bitmapQueue[index];
+      if (entry && entry.sourceChannel.toUpperCase() === normalized) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private findLatestBitmapIndexForView(viewName: string): number {
+    const normalized = trimText(viewName).toUpperCase();
+    let index = 0;
+
+    if (!normalized.length) {
+      return -1;
+    }
+
+    for (index = this.bitmapQueue.length - 1; index >= 0; index -= 1) {
+      const entry = this.bitmapQueue[index];
+      if (entry && entry.sourceChannel.toUpperCase() === normalized) {
+        return index;
+      }
+    }
+
+    return -1;
+  }
+
+  private openBitmapViewer(): void {
+    let startIndex = this.bitmapQueue.length - 1;
+
+    if (!this.bitmapQueue.length) {
+      if (this.currentChannel.length) {
+        this.appendViewNotice(this.currentChannel, "No images queued yet.");
+      }
+      return;
+    }
+
+    if (this.modalState) {
+      this.closeModal();
+    }
+
+    this.bitmapViewerActive = true;
+    if (this.currentChannel.length) {
+      const currentViewIndex = this.findLatestBitmapIndexForView(this.currentChannel);
+      if (currentViewIndex >= 0) {
+        startIndex = currentViewIndex;
+      }
+    }
+    this.bitmapViewerIndex = startIndex;
+    this.bitmapViewerScrollY = 0;
+    this.bitmapViewerUse256Color = true;
+    this.bitmapViewerSignature = "";
+    this.unviewedBitmapCount = 0;
+    this.actionSignature = "";
+    this.statusSignature = "";
+    this.transcriptSignature = "";
+    this.destroyModalFrames();
+  }
+
+  private closeBitmapViewer(): void {
+    if (!this.bitmapViewerActive) {
+      return;
+    }
+
+    this.bitmapViewerActive = false;
+    this.bitmapViewerIndex = -1;
+    this.bitmapViewerScrollY = 0;
+    this.bitmapViewerSignature = "";
+    this.destroyModalFrames();
+    try {
+      console.print("\x1b[0m");
+      console.attributes = WHITE;
+    } catch (_error) {
+    }
+    this.resetRenderSignatures();
+  }
+
+  private handleBitmapViewerInput(key: string): boolean {
+    if (!this.bitmapViewerActive) {
+      return false;
+    }
+
+    switch (key) {
+      case KEY_LEFT:
+      case "[":
+        this.moveBitmapViewer(-1);
+        return true;
+      case KEY_RIGHT:
+      case "]":
+        this.moveBitmapViewer(1);
+        return true;
+      case KEY_UP:
+        this.scrollBitmapViewer(-1);
+        return true;
+      case KEY_DOWN:
+        this.scrollBitmapViewer(1);
+        return true;
+      case KEY_PAGEUP:
+        this.scrollBitmapViewer(-10);
+        return true;
+      case KEY_PAGEDN:
+        this.scrollBitmapViewer(10);
+        return true;
+      case KEY_HOME:
+        this.bitmapViewerScrollY = 0;
+        this.bitmapViewerSignature = "";
+        return true;
+      case KEY_END:
+        this.bitmapViewerScrollY = this.getBitmapViewerMaxScrollY();
+        this.bitmapViewerSignature = "";
+        return true;
+      case "c":
+      case "C":
+        this.bitmapViewerUse256Color = !this.bitmapViewerUse256Color;
+        this.bitmapViewerSignature = "";
+        return true;
+      case "\x0c":
+        this.bitmapViewerSignature = "";
+        return true;
+      case KEY_ESC:
+      case "\x1b":
+      case "\r":
+      case " ":
+        this.closeBitmapViewer();
+        return true;
+      default:
+        this.closeBitmapViewer();
+        return true;
+    }
+  }
+
+  private moveBitmapViewer(delta: number): void {
+    const nextIndex = this.bitmapViewerIndex + delta;
+
+    if (nextIndex < 0 || nextIndex >= this.bitmapQueue.length) {
+      return;
+    }
+
+    this.bitmapViewerIndex = nextIndex;
+    this.bitmapViewerScrollY = 0;
+    this.bitmapViewerSignature = "";
+  }
+
+  private getBitmapViewerMaxScrollY(): number {
+    const entry = this.bitmapViewerIndex >= 0 ? this.bitmapQueue[this.bitmapViewerIndex] : null;
+    const contentHeight = Math.max(1, this.frames.height - 2);
+
+    if (!entry) {
+      return 0;
+    }
+
+    return Math.max(0, entry.height - contentHeight);
+  }
+
+  private scrollBitmapViewer(delta: number): void {
+    const maxScroll = this.getBitmapViewerMaxScrollY();
+    const nextScroll = clamp(this.bitmapViewerScrollY + delta, 0, maxScroll);
+
+    if (nextScroll === this.bitmapViewerScrollY) {
+      return;
+    }
+
+    this.bitmapViewerScrollY = nextScroll;
+    this.bitmapViewerSignature = "";
+  }
+
   private buildPublicMessageKey(channelName: string, message: ChatMessage): string {
     const sender = normalizePrivateNick(message.nick || null);
     const senderKey = sender
@@ -544,6 +838,8 @@ export class AvatarChatApp {
         if (!message || !this.rememberPublicChannelMessage(channel.name, message)) {
           continue;
         }
+
+        this.processBitmapMessage(channel.name, message);
 
         // Enrich join/leave notices with BBS name
         if (!message.nick) {
@@ -657,6 +953,10 @@ export class AvatarChatApp {
     this.lastKeyTimestamp = Date.now();
     if (this.idleAnimActive) {
       this.stopIdleAnimations();
+    }
+
+    if (this.bitmapViewerActive && this.handleBitmapViewerInput(key)) {
+      return;
     }
 
     if (this.modalState && this.handleModalInput(key)) {
@@ -1020,6 +1320,14 @@ export class AvatarChatApp {
     switch (verb) {
       case "HELP":
         this.performAction("help");
+        return;
+      case "IMG":
+      case "IMAGE":
+      case "IMAGES":
+      case "ART":
+      case "PIC":
+      case "PICS":
+        this.openBitmapViewer();
         return;
       case "WHO":
         this.performAction("who");
@@ -1444,6 +1752,9 @@ export class AvatarChatApp {
       case "who":
         this.openRosterModal();
         return;
+      case "img":
+        this.openBitmapViewer();
+        return;
       case "channels":
         this.openChannelsModal();
         return;
@@ -1537,12 +1848,13 @@ export class AvatarChatApp {
       selectedIndex: 0,
       lines: [
         "Slash commands:",
-        "/who, /channels, /private, /help, /join <channel>, /part [channel], /me <action>, /msg <user> <message>, /r <message>, /clear",
+        "/who, /img, /channels, /private, /help, /join <channel>, /part [channel], /me <action>, /msg <user> <message>, /r <message>, /clear",
         "",
         "Keys:",
         "Tab autocompletes user names.",
         "Esc exits the chat or closes a modal.",
         "Arrow keys, Home/End, and Backspace edit the input line.",
+        "Image viewer uses Up/Down to scroll, [ ] to switch images, and C to toggle 256/16 color.",
         "",
         "The top action bar is keyboard-first today and can grow mouse support later."
       ]
@@ -2152,6 +2464,32 @@ export class AvatarChatApp {
     this.frames.modal.open();
   }
 
+  private ensureBitmapViewerFrames(): void {
+    if (!this.bitmapViewerActive || !this.frames.root) {
+      this.destroyModalFrames();
+      return;
+    }
+
+    if (
+      this.frames.overlay &&
+      this.frames.modal &&
+      this.frames.overlay.width === this.frames.width &&
+      this.frames.overlay.height === this.frames.height &&
+      this.frames.modal.width === this.frames.width &&
+      this.frames.modal.height === this.frames.height
+    ) {
+      return;
+    }
+
+    this.destroyModalFrames();
+
+    this.frames.overlay = new Frame(1, 1, this.frames.width, this.frames.height, BG_BLACK | BLACK, this.frames.root);
+    this.frames.overlay.open();
+
+    this.frames.modal = new Frame(1, 1, this.frames.width, this.frames.height, BG_BLACK | BLACK, this.frames.overlay);
+    this.frames.modal.open();
+  }
+
   private getModalGeometry(): ModalGeometry | null {
     let width = 0;
     let height = 0;
@@ -2520,6 +2858,12 @@ export class AvatarChatApp {
 
   private render(): void {
     this.ensureFrames();
+
+    if (this.bitmapViewerActive) {
+      this.renderBitmapViewer();
+      return;
+    }
+
     this.renderHeader();
     this.renderActions();
     this.renderTranscript();
@@ -2586,12 +2930,22 @@ export class AvatarChatApp {
   private renderActions(): void {
     const actionsFrame = this.frames.actions;
     const unreadPmCount = this.getUnreadPrivateThreadCount();
+    const imageCount = this.bitmapQueue.length;
+    const unviewedImageCount = this.unviewedBitmapCount;
     const flashPhase = unreadPmCount > 0 ? Math.floor(new Date().getTime() / 500) % 2 : 0;
+    const imageFlashPhase = unviewedImageCount > 0 ? Math.floor(new Date().getTime() / 500) % 2 : 0;
     const actions = ACTION_BAR_ACTIONS.map(function (action) {
       const nextAction: ActionBarAction = {
         id: action.id,
         label: action.label
       };
+
+      if (action.id === "img" && imageCount > 0) {
+        nextAction.label = "/img [" + String(imageCount) + "]";
+        if (unviewedImageCount > 0) {
+          nextAction.attr = imageFlashPhase ? (BG_RED | YELLOW) : (BG_CYAN | BLACK);
+        }
+      }
 
       if (action.id === "private" && unreadPmCount > 0) {
         nextAction.label = "/private [" + String(unreadPmCount) + "]";
@@ -2620,7 +2974,8 @@ export class AvatarChatApp {
     const transcriptFrame = this.frames.transcript;
     const channel = this.currentChannel.length ? this.getChannelByName(this.currentChannel) : null;
     const privateThread = this.currentChannel.length ? this.getPrivateThreadByName(this.currentChannel) : null;
-    const messages = channel ? channel.messages : (privateThread ? privateThread.messages : []);
+    const rawMessages = channel ? channel.messages : (privateThread ? privateThread.messages : []);
+    const messages = this.getRenderableMessages(rawMessages);
     const signature = this.buildTranscriptSignature(messages);
     let renderState: TranscriptRenderState;
     let emptyText = "";
@@ -2638,9 +2993,9 @@ export class AvatarChatApp {
     } else if (!channel && !privateThread) {
       emptyText = "No joined channels. Use /join <channel>.";
     } else if (privateThread) {
-      emptyText = "No private messages yet.";
+      emptyText = this.hasImagesForView(this.currentChannel) ? "No text messages yet. Use /img to view images." : "No private messages yet.";
     } else {
-      emptyText = "No messages yet.";
+      emptyText = this.hasImagesForView(this.currentChannel) ? "No text messages yet. Use /img to view images." : "No messages yet.";
     }
 
     renderState = renderTranscript(
@@ -2710,6 +3065,248 @@ export class AvatarChatApp {
     this.inputSignature = signature;
   }
 
+  private color256To16(color: number): number {
+    let normalized = color;
+    let gray = 0;
+    let index = 0;
+    let red = 0;
+    let green = 0;
+    let blue = 0;
+    let bright = 0;
+
+    if (normalized < 0) {
+      normalized = 0;
+    }
+
+    if (normalized < 16) {
+      return normalized;
+    }
+
+    if (normalized >= 232) {
+      gray = normalized - 232;
+      if (gray < 6) {
+        return 0;
+      }
+      if (gray < 12) {
+        return 8;
+      }
+      if (gray < 18) {
+        return 7;
+      }
+      return 15;
+    }
+
+    index = normalized - 16;
+    red = Math.floor(index / 36);
+    green = Math.floor((index % 36) / 6);
+    blue = index % 6;
+    bright = (red > 2 || green > 2 || blue > 2) ? 8 : 0;
+
+    return bright |
+      (red > 1 ? 4 : 0) |
+      (green > 1 ? 2 : 0) |
+      (blue > 1 ? 1 : 0);
+  }
+
+  private sanitizeBitmapChar(cell: BitmapCell, fg: number, bg: number): string {
+    let ch = cell.ch || " ";
+
+    if (
+      cell.charCode === 7 ||
+      cell.charCode === 8 ||
+      cell.charCode === 9 ||
+      cell.charCode === 10 ||
+      cell.charCode === 11 ||
+      cell.charCode === 12 ||
+      cell.charCode === 13 ||
+      cell.charCode === 27
+    ) {
+      return " ";
+    }
+
+    if (fg === bg && (cell.charCode === 220 || cell.charCode === 223)) {
+      try {
+        ch = ascii(219);
+      } catch (_error) {
+        ch = String.fromCharCode(219);
+      }
+    }
+
+    return ch;
+  }
+
+  private buildBitmapViewerSignature(): string {
+    const entry = this.bitmapViewerIndex >= 0 ? (this.bitmapQueue[this.bitmapViewerIndex] || null) : null;
+
+    if (!this.bitmapViewerActive || !entry) {
+      return "";
+    }
+
+    return [
+      String(this.frames.width),
+      String(this.frames.height),
+      String(this.bitmapQueue.length),
+      String(this.bitmapViewerIndex),
+      String(this.bitmapViewerScrollY),
+      String(this.bitmapViewerUse256Color),
+      String(entry.time || 0),
+      String(entry.width),
+      String(entry.height)
+    ].join("|");
+  }
+
+  private renderBitmapViewer(): void {
+    const signature = this.buildBitmapViewerSignature();
+    let entry = this.bitmapViewerIndex >= 0 ? (this.bitmapQueue[this.bitmapViewerIndex] || null) : null;
+    let modalFrame = this.frames.modal;
+    let title = "";
+    let status = "";
+    let contentHeight = 0;
+    let maxScrollY = 0;
+    let row = 0;
+
+    if (!this.bitmapViewerActive) {
+      this.destroyModalFrames();
+      return;
+    }
+
+    if (!entry) {
+      this.closeBitmapViewer();
+      return;
+    }
+
+    this.ensureBitmapViewerFrames();
+    modalFrame = this.frames.modal;
+    if (!this.frames.overlay || !modalFrame) {
+      return;
+    }
+
+    maxScrollY = this.getBitmapViewerMaxScrollY();
+    if (this.bitmapViewerScrollY > maxScrollY) {
+      this.bitmapViewerScrollY = maxScrollY;
+    }
+
+    entry = this.bitmapQueue[this.bitmapViewerIndex] || null;
+    if (!entry) {
+      this.closeBitmapViewer();
+      return;
+    }
+
+    if (signature === this.bitmapViewerSignature) {
+      return;
+    }
+
+    contentHeight = Math.max(1, modalFrame.height - 2);
+    title = clipText(
+      "Image " +
+      String(this.bitmapViewerIndex + 1) +
+      "/" +
+      String(this.bitmapQueue.length) +
+      " | " +
+      entry.fromName +
+      " | " +
+      entry.sourceChannel,
+      modalFrame.width
+    );
+    status = "";
+    if (this.bitmapQueue.length > 1) {
+      status += "[ ] image | ";
+    }
+    if (maxScrollY > 0) {
+      status += "Up/Down scroll | ";
+    }
+    status += "C " + (this.bitmapViewerUse256Color ? "256c" : "16c") + " | Esc close | " + String(entry.width) + "x" + String(entry.height);
+    if (maxScrollY > 0) {
+      status += " | y " + String(this.bitmapViewerScrollY) + "/" + String(maxScrollY);
+    }
+    status = clipText(status, modalFrame.width);
+
+    this.frames.overlay.clear(BG_BLACK | BLACK);
+    modalFrame.clear(BG_BLACK | BLACK);
+    modalFrame.gotoxy(1, 1);
+    modalFrame.putmsg(padRight(title, modalFrame.width), BG_BLACK | LIGHTCYAN);
+    modalFrame.gotoxy(1, modalFrame.height);
+    modalFrame.putmsg(padRight(status, modalFrame.width), BG_BLACK | LIGHTCYAN);
+
+    if (!this.bitmapViewerUse256Color) {
+      let displayWidth = modalFrame.width;
+
+      for (row = 0; row < contentHeight; row += 1) {
+        const srcY = row + this.bitmapViewerScrollY;
+        let column = 0;
+
+        if (srcY >= entry.height) {
+          continue;
+        }
+
+        for (column = 0; column < displayWidth && column < entry.width; column += 1) {
+          const cell = entry.bitmap[srcY * entry.width + column];
+          let fg16 = 7;
+          let bg16 = 0;
+          let attr = WHITE;
+          let ch = " ";
+
+          if (!cell) {
+            continue;
+          }
+
+          fg16 = this.color256To16(cell.fg);
+          bg16 = this.color256To16(cell.bg);
+          ch = this.sanitizeBitmapChar(cell, fg16, bg16);
+          attr = ((bg16 & 7) << 4) | (fg16 & 15);
+          modalFrame.setData(column, row + 1, ch, attr, false);
+        }
+      }
+    }
+
+    if (this.frames.root) {
+      this.frames.root.cycle();
+    }
+
+    if (this.bitmapViewerUse256Color) {
+      const displayWidth = modalFrame.width;
+
+      for (row = 0; row < contentHeight; row += 1) {
+        const srcY = row + this.bitmapViewerScrollY;
+        let line = "";
+        let lastFg = -1;
+        let lastBg = -1;
+        let column = 0;
+
+        if (srcY >= entry.height) {
+          continue;
+        }
+
+        console.gotoxy(1, row + 2);
+        for (column = 0; column < displayWidth && column < entry.width; column += 1) {
+          const cell = entry.bitmap[srcY * entry.width + column];
+          let fg = 7;
+          let bg = 0;
+          let ch = " ";
+
+          if (!cell) {
+            continue;
+          }
+
+          fg = cell.fg;
+          bg = cell.bg;
+          ch = this.sanitizeBitmapChar(cell, fg, bg);
+          if (fg !== lastFg || bg !== lastBg) {
+            line += "\x1b[38;5;" + String(fg) + "m\x1b[48;5;" + String(bg) + "m";
+            lastFg = fg;
+            lastBg = bg;
+          }
+          line += ch;
+        }
+        line += "\x1b[0m";
+        console.print(line);
+      }
+      console.gotoxy(1, modalFrame.height);
+    }
+
+    this.bitmapViewerSignature = this.buildBitmapViewerSignature();
+  }
+
   private renderActiveModal(): void {
     const signature = this.buildModalSignature();
 
@@ -2769,6 +3366,7 @@ export class AvatarChatApp {
 
   private buildStatusText(): string {
     const unreadPmCount = this.getUnreadPrivateThreadCount();
+    const imageHint = this.buildBitmapStatusHint();
 
     if (this.modalState) {
       switch (this.modalState.kind) {
@@ -2786,22 +3384,34 @@ export class AvatarChatApp {
     }
 
     if (!this.chat) {
-      return this.buildDisconnectedText() + " | /connect | Esc exit";
+      return this.buildDisconnectedText() + " | /connect | Esc exit" + imageHint;
     }
 
     if (this.transcriptScrollOffsetBlocks > 0) {
-      return "History " + String(this.transcriptScrollOffsetBlocks) + " back | Up/PgUp older | Down/PgDn newer | End latest";
+      return "History " + String(this.transcriptScrollOffsetBlocks) + " back | Up/PgUp older | Down/PgDn newer | End latest" + imageHint;
     }
 
     if (this.getPrivateThreadByName(this.currentChannel)) {
-      return "Private chat | /msg <user> <message> | /r <message> | /private | /channels | Tab user | Esc exit";
+      return "Private chat | /img | /msg <user> <message> | /r <message> | /private | /channels | Tab user | Esc exit" + imageHint;
     }
 
     if (unreadPmCount > 0) {
-      return "Private unread " + String(unreadPmCount) + " | /private | /msg <user> <message> | /r <message> | Tab user | Esc exit";
+      return "Private unread " + String(unreadPmCount) + " | /img | /private | /msg <user> <message> | /r <message> | Tab user | Esc exit" + imageHint;
     }
 
-    return "Up/PgUp history | /who /channels /private /help | /join /part /me /msg /r /clear | Tab user | Esc exit";
+    return "Up/PgUp history | /who /img /channels /private /help | /join /part /me /msg /r /clear | Tab user | Esc exit" + imageHint;
+  }
+
+  private buildBitmapStatusHint(): string {
+    if (this.unviewedBitmapCount > 0) {
+      return " | new img " + String(this.unviewedBitmapCount) + " /img";
+    }
+
+    if (this.bitmapQueue.length > 0) {
+      return " | /img " + String(this.bitmapQueue.length);
+    }
+
+    return "";
   }
 
   private getUnreadPrivateThreadCount(): number {
@@ -2877,6 +3487,7 @@ export class AvatarChatApp {
     this.statusSignature = "";
     this.inputSignature = "";
     this.modalSignature = "";
+    this.bitmapViewerSignature = "";
   }
 
   private buildModalSignature(): string {

@@ -721,6 +721,11 @@ var avatarChatCanUseRealtime = is_user();
         return trimText(String(raw || '')).replace(/[\x00-\x1f]/g, '').substr(0, 60);
     }
 
+    function isBitmapMessageText(text) {
+        var value = String(text || '');
+        return value.indexOf('[BITMAP|') === 0 && value.charAt(value.length - 1) === ']';
+    }
+
     function buildNameKey(name) {
         return normalizeUpper(name).replace(/[^A-Z0-9]/g, '');
     }
@@ -1404,17 +1409,20 @@ var avatarChatCanUseRealtime = is_user();
     }
 
     function renderMessages() {
+        var renderableMessages = messages.filter(function (message) {
+            return !isBitmapMessageText(message && message.text);
+        });
         var html = '';
         var previousSender = '';
         var previousTime = 0;
         var groupWindow = 120000;
 
-        if (!messages.length) {
+        if (!renderableMessages.length) {
             messageContainer.innerHTML = '<div class="avatar-chat-empty">No messages yet. Say hello.</div>';
             return;
         }
 
-        messages.forEach(function (message) {
+        renderableMessages.forEach(function (message) {
             var isSystem = !message.sender;
             var isSelf = !!message.isSelf;
             var sameGroup = message.sender === previousSender && Math.abs((message.timestamp || 0) - previousTime) < groupWindow;
