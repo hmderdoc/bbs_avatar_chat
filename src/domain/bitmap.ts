@@ -24,6 +24,8 @@ export interface BitmapEntry extends DecodedBitmap {
   fromName: string;
   sourceChannel: string;
   time: number;
+  isPrivate: boolean;
+  isIncomingPrivate: boolean;
 }
 
 interface InflateState {

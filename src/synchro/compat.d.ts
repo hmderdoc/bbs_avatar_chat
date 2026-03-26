@@ -91,6 +91,11 @@ interface SynchronetUser {
   number: number;
   alias: string;
   ip_address: string;
+  is_sysop?: boolean;
+  compare_ars?(ars: string): boolean;
+  security?: {
+    level?: number;
+  };
 }
 
 declare const user: SynchronetUser;
