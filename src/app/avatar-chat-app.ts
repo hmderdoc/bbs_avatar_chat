@@ -232,7 +232,11 @@ export class AvatarChatApp {
     }
 
     try {
-      avatarObj = this.avatarLib.read(user.number, user.alias, null, null) || null;
+      if (typeof this.avatarLib.read_localuser === "function") {
+        avatarObj = this.avatarLib.read_localuser(user.number) || null;
+      } else {
+        avatarObj = this.avatarLib.read(user.number, user.alias, null, null) || null;
+      }
     } catch (_error) {
       avatarObj = null;
     }
@@ -400,6 +404,9 @@ export class AvatarChatApp {
     if (!peerNick) {
       return;
     }
+
+    this.processMessageAvatar(message);
+    this.hydrateEmbeddedAvatar(peerNick);
 
     if (!this.rememberPrivateMessage(message)) {
       return;
@@ -689,6 +696,44 @@ export class AvatarChatApp {
 
   private isOwnMessage(message: ChatMessage): boolean {
     return !!(message && message.nick && message.nick.name && this.isOwnNickName(message.nick.name));
+  }
+
+  private rememberEmbeddedAvatar(nick: ChatNick | null | undefined): void {
+    const name = nick && nick.name ? trimText(String(nick.name)) : "";
+    const avatar = nick && nick.avatar ? trimText(String(nick.avatar)) : "";
+
+    if (!name.length || !avatar.length) {
+      return;
+    }
+
+    this.embeddedAvatars[name.toUpperCase()] = avatar;
+  }
+
+  private hydrateEmbeddedAvatar(nick: ChatNick | null | undefined): void {
+    const name = nick && nick.name ? trimText(String(nick.name)) : "";
+    let avatar = "";
+
+    if (!nick || !name.length || nick.avatar) {
+      return;
+    }
+
+    avatar = this.embeddedAvatars[name.toUpperCase()] || "";
+    if (avatar.length) {
+      nick.avatar = avatar;
+    }
+  }
+
+  private processMessageAvatar(message: ChatMessage | null | undefined): void {
+    if (!message || !message.nick) {
+      return;
+    }
+
+    if (message.nick.avatar) {
+      this.rememberEmbeddedAvatar(message.nick);
+      return;
+    }
+
+    this.hydrateEmbeddedAvatar(message.nick);
   }
 
   private buildPrivateBitmapNoticeText(message: ChatMessage): string {
@@ -1100,12 +1145,7 @@ export class AvatarChatApp {
       for (index = 0; index < channel.messages.length; index += 1) {
         const message = channel.messages[index];
 
-        if (message && message.nick && message.nick.avatar) {
-          const avatarData = String(message.nick.avatar).replace(/^\s+|\s+$/g, "");
-          if (avatarData.length) {
-            this.embeddedAvatars[message.nick.name.toUpperCase()] = avatarData;
-          }
-        }
+        this.processMessageAvatar(message);
 
         if (!message || !this.rememberPublicChannelMessage(channel.name, message)) {
           continue;
@@ -2201,7 +2241,7 @@ export class AvatarChatApp {
       seen,
       user.alias,
       system.name,
-      { name: user.alias, host: system.name, ip: user.ip_address, qwkid: system.qwk_id },
+      { name: user.alias, host: system.name, ip: user.ip_address, qwkid: system.qwk_id, avatar: this.getOwnAvatarData() },
       true
     );
 
