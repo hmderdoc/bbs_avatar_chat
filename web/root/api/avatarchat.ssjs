@@ -500,7 +500,6 @@ function summarizePublicChannel(client, channelName, sinceTimestamp, ownAlias, c
     var index = 0;
     var lastTimestamp = 0;
     var newCount = 0;
-    var users = {};
     var whoCount = 0;
 
     for (index = 0; index < history.length; index += 1) {
@@ -527,8 +526,7 @@ function summarizePublicChannel(client, channelName, sinceTimestamp, ownAlias, c
     }
 
     try {
-        users = client.who('chat', 'channels.' + channelName + '.messages') || {};
-        whoCount = getKeys(users).length;
+        whoCount = buildWhoUsers(client, channelName).length;
     } catch (_whoError) {
         whoCount = 0;
     }
@@ -680,6 +678,7 @@ function buildPrivateMessage(sender, recipient, text, timestamp) {
 function buildWhoUsers(client, channel) {
     var users = [];
     var whoResult = client.who('chat', 'channels.' + channel + '.messages') || {};
+    var seen = {};
     var key;
 
     for (key in whoResult) {
@@ -691,18 +690,35 @@ function buildWhoUsers(client, channel) {
         var nickObj = normalizeNick(entry && entry.nick && typeof entry.nick === 'object' ? entry.nick : null);
         var nickName = nickObj && nickObj.name ? nickObj.name : String(entry && entry.nick ? entry.nick : key);
         var systemName = nickObj && nickObj.host ? nickObj.host : String(entry && entry.system ? entry.system : '');
+        var qwkid = nickObj && nickObj.qwkid ? nickObj.qwkid : '';
+        var identityKey = '$' + normalizeUpper(nickName) + '|' + normalizeUpper(qwkid || systemName);
         var userNumber = 0;
+        var existingIndex = seen[identityKey];
 
         if (nickName.length) {
             try { userNumber = system.matchuser(nickName) || 0; } catch (_matchUserError) {}
         }
 
+        if (typeof existingIndex === 'number') {
+            if (!users[existingIndex].avatar && nickObj && nickObj.avatar) {
+                users[existingIndex].avatar = nickObj.avatar;
+            }
+            if (!users[existingIndex].qwkid && qwkid) {
+                users[existingIndex].qwkid = qwkid;
+            }
+            if (!users[existingIndex].userNumber && userNumber) {
+                users[existingIndex].userNumber = userNumber;
+            }
+            continue;
+        }
+
+        seen[identityKey] = users.length;
         users.push({
             nick: nickName,
             system: systemName,
             userNumber: userNumber,
             avatar: nickObj && nickObj.avatar ? nickObj.avatar : undefined,
-            qwkid: nickObj && nickObj.qwkid ? nickObj.qwkid : undefined
+            qwkid: qwkid || undefined
         });
     }
 
@@ -797,37 +813,9 @@ switch (action) {
         }
 
         reply = withClient(config, function (client) {
-            var users = [];
-            var whoResult = client.who('chat', 'channels.' + whoChannel + '.messages') || {};
-            var key;
-
-            for (key in whoResult) {
-                if (!Object.prototype.hasOwnProperty.call(whoResult, key)) {
-                    continue;
-                }
-
-                var entry = whoResult[key];
-                var nickObj = normalizeNick(entry && entry.nick && typeof entry.nick === 'object' ? entry.nick : null);
-                var nickName = nickObj && nickObj.name ? nickObj.name : String(entry && entry.nick ? entry.nick : key);
-                var systemName = nickObj && nickObj.host ? nickObj.host : String(entry && entry.system ? entry.system : '');
-                var userNumber = 0;
-
-                if (nickName.length) {
-                    try { userNumber = system.matchuser(nickName) || 0; } catch (_matchUserError) {}
-                }
-
-                users.push({
-                    nick: nickName,
-                    system: systemName,
-                    userNumber: userNumber,
-                    avatar: nickObj && nickObj.avatar ? nickObj.avatar : undefined,
-                    qwkid: nickObj && nickObj.qwkid ? nickObj.qwkid : undefined
-                });
-            }
-
             return {
                 channel: whoChannel,
-                users: users,
+                users: buildWhoUsers(client, whoChannel),
                 serverTime: Date.now()
             };
         });

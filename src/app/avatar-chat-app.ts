@@ -218,6 +218,7 @@ export class AvatarChatApp {
         this.render();
       }
     } finally {
+      this.closeChatConnection();
       this.destroyFrames();
       console.clear(BG_BLACK | LIGHTGRAY);
       console.home();
@@ -251,7 +252,7 @@ export class AvatarChatApp {
   private connect(): void {
     const desiredChannels = this.getJoinedPublicChannelNames();
     const desiredCurrent = this.currentChannel;
-    let client;
+    let client: JSONClient | null = null;
     let index = 0;
 
     try {
@@ -286,6 +287,7 @@ export class AvatarChatApp {
         }
       }
 
+      this.deduplicateChannelRosters();
       this.loadPrivateHistory();
       this.syncPublicChannelUnreadCounts(false);
       this.syncChannelOrder();
@@ -305,8 +307,29 @@ export class AvatarChatApp {
       this.lastError = "";
       this.resetRenderSignatures();
     } catch (error) {
-      this.chat = null;
+      this.closeChatConnection(client);
       this.scheduleReconnect("Connection failed: " + String(error));
+    }
+  }
+
+  private closeChatConnection(fallbackClient?: JSONClient | null): void {
+    const chat = this.chat;
+    const client = chat && chat.client ? chat.client : (fallbackClient || null);
+
+    this.chat = null;
+
+    if (chat) {
+      try {
+        chat.disconnect();
+      } catch (_unsubscribeError) {
+      }
+    }
+
+    if (client) {
+      try {
+        client.disconnect();
+      } catch (_disconnectError) {
+      }
     }
   }
 
@@ -317,17 +340,14 @@ export class AvatarChatApp {
 
     try {
       this.chat.cycle();
+      this.deduplicateChannelRosters();
       this.syncPublicChannelUnreadCounts(true);
       this.syncPrivateHistory();
       this.syncChannelOrder();
       this.refreshMotd(false);
       this.trimHistories();
     } catch (error) {
-      try {
-        this.chat.disconnect();
-      } catch (_disconnectError) {
-      }
-      this.chat = null;
+      this.closeChatConnection();
       this.scheduleReconnect("Connection lost: " + String(error));
     }
   }
@@ -1675,11 +1695,7 @@ export class AvatarChatApp {
       case "CLOSE":
       case "DISCONNECT":
         if (this.chat) {
-          try {
-            this.chat.disconnect();
-          } catch (_disconnectError) {
-          }
-          this.chat = null;
+          this.closeChatConnection();
           this.scheduleReconnect("Disconnected.");
         }
         return;
@@ -2707,6 +2723,48 @@ export class AvatarChatApp {
     }
 
     return null;
+  }
+
+  private deduplicateChannelRosters(): void {
+    let channelKey = "";
+
+    if (!this.chat) {
+      return;
+    }
+
+    for (channelKey in this.chat.channels) {
+      if (!Object.prototype.hasOwnProperty.call(this.chat.channels, channelKey)) {
+        continue;
+      }
+
+      const channel = this.chat.channels[channelKey];
+      const uniqueUsers: ChatUserEntry[] = [];
+      const seen: { [identity: string]: boolean } = {};
+      let index = 0;
+
+      if (!channel || !channel.users) {
+        continue;
+      }
+
+      for (index = 0; index < channel.users.length; index += 1) {
+        const rawEntry = channel.users[index];
+        const rosterEntry = this.extractRosterEntry(rawEntry);
+
+        if (!rawEntry || !rosterEntry) {
+          continue;
+        }
+
+        const identity = rosterEntry.name.toUpperCase() + "|" + rosterEntry.bbs.toUpperCase();
+        if (seen[identity]) {
+          continue;
+        }
+
+        seen[identity] = true;
+        uniqueUsers.push(rawEntry);
+      }
+
+      channel.users = uniqueUsers;
+    }
   }
 
   private ensureFrames(): void {

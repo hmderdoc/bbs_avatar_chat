@@ -1,5 +1,5 @@
 // Avatar Chat - Auto-generated, do not edit directly.
-// Built: 2026-06-06T17:32:23.570Z
+// Built: 2026-07-25T12:34:42.711Z
 load("sbbsdefs.js");
 load("key_defs.js");
 load("frame.js");
@@ -1701,6 +1701,7 @@ load("json-chat.js");
             this.render();
           }
         } finally {
+          this.closeChatConnection();
           this.destroyFrames();
           console.clear(BG_BLACK | LIGHTGRAY);
           console.home();
@@ -1728,7 +1729,7 @@ load("json-chat.js");
       AvatarChatApp2.prototype.connect = function() {
         var desiredChannels = this.getJoinedPublicChannelNames();
         var desiredCurrent = this.currentChannel;
-        var client;
+        var client = null;
         var index = 0;
         try {
           client = new JSONClient(this.config.host, this.config.port);
@@ -1759,6 +1760,7 @@ load("json-chat.js");
               this.chat.join(channelName);
             }
           }
+          this.deduplicateChannelRosters();
           this.loadPrivateHistory();
           this.syncPublicChannelUnreadCounts(false);
           this.syncChannelOrder();
@@ -1776,8 +1778,25 @@ load("json-chat.js");
           this.lastError = "";
           this.resetRenderSignatures();
         } catch (error) {
-          this.chat = null;
+          this.closeChatConnection(client);
           this.scheduleReconnect("Connection failed: " + String(error));
+        }
+      };
+      AvatarChatApp2.prototype.closeChatConnection = function(fallbackClient) {
+        var chat = this.chat;
+        var client = chat && chat.client ? chat.client : fallbackClient || null;
+        this.chat = null;
+        if (chat) {
+          try {
+            chat.disconnect();
+          } catch (_unsubscribeError) {
+          }
+        }
+        if (client) {
+          try {
+            client.disconnect();
+          } catch (_disconnectError) {
+          }
         }
       };
       AvatarChatApp2.prototype.cycleChat = function() {
@@ -1786,17 +1805,14 @@ load("json-chat.js");
         }
         try {
           this.chat.cycle();
+          this.deduplicateChannelRosters();
           this.syncPublicChannelUnreadCounts(true);
           this.syncPrivateHistory();
           this.syncChannelOrder();
           this.refreshMotd(false);
           this.trimHistories();
         } catch (error) {
-          try {
-            this.chat.disconnect();
-          } catch (_disconnectError) {
-          }
-          this.chat = null;
+          this.closeChatConnection();
           this.scheduleReconnect("Connection lost: " + String(error));
         }
       };
@@ -2888,11 +2904,7 @@ load("json-chat.js");
           case "CLOSE":
           case "DISCONNECT":
             if (this.chat) {
-              try {
-                this.chat.disconnect();
-              } catch (_disconnectError) {
-              }
-              this.chat = null;
+              this.closeChatConnection();
               this.scheduleReconnect("Disconnected.");
             }
             return;
@@ -3694,6 +3706,38 @@ load("json-chat.js");
           }
         }
         return null;
+      };
+      AvatarChatApp2.prototype.deduplicateChannelRosters = function() {
+        var channelKey = "";
+        if (!this.chat) {
+          return;
+        }
+        for (channelKey in this.chat.channels) {
+          if (!Object.prototype.hasOwnProperty.call(this.chat.channels, channelKey)) {
+            continue;
+          }
+          var channel = this.chat.channels[channelKey];
+          var uniqueUsers = [];
+          var seen = {};
+          var index = 0;
+          if (!channel || !channel.users) {
+            continue;
+          }
+          for (index = 0; index < channel.users.length; index += 1) {
+            var rawEntry = channel.users[index];
+            var rosterEntry = this.extractRosterEntry(rawEntry);
+            if (!rawEntry || !rosterEntry) {
+              continue;
+            }
+            var identity = rosterEntry.name.toUpperCase() + "|" + rosterEntry.bbs.toUpperCase();
+            if (seen[identity]) {
+              continue;
+            }
+            seen[identity] = true;
+            uniqueUsers.push(rawEntry);
+          }
+          channel.users = uniqueUsers;
+        }
       };
       AvatarChatApp2.prototype.ensureFrames = function() {
         var width = console.screen_columns;
